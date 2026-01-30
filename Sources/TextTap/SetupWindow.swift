@@ -14,6 +14,7 @@ class SetupWindow {
     private var setupTask: Task<Void, Never>?
 
     var onSetupComplete: (() -> Void)?
+    var onAccessibilityGranted: (() -> Void)?
 
     private static let baseDirectory: URL = {
         let home = FileManager.default.homeDirectoryForCurrentUser
@@ -140,6 +141,8 @@ class SetupWindow {
                     if Task.isCancelled { return }
                     try? await Task.sleep(nanoseconds: 500_000_000)
                 }
+                // Accessibility was just granted - notify so hotkey can be set up
+                self.onAccessibilityGranted?()
             }
 
             guard self.window != nil else { return }

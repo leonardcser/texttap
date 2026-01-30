@@ -30,6 +30,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func showSetupWindowIfNeeded() {
         if SetupWindow.needsSetup {
             setupWindow = SetupWindow()
+            setupWindow?.onAccessibilityGranted = { [weak self] in
+                // Now that accessibility is granted, set up the global hotkey
+                self?.setupGlobalHotkey()
+            }
+            setupWindow?.onSetupComplete = { [weak self] in
+                // If model is already loaded, hide the window now
+                // Otherwise, onModelStateChange will hide it when model loads
+                if self?.isModelLoading == false {
+                    self?.setupWindow?.hide()
+                    self?.setupWindow = nil
+                }
+            }
             setupWindow?.show()
         }
     }
@@ -87,8 +99,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async {
                 self?.isModelLoading = !isLoaded
                 if isLoaded {
-                    self?.setupWindow?.hide()
-                    self?.setupWindow = nil
+                    // Only hide setup window if microphone permission is already granted
+                    // Otherwise, let the setup flow complete and onSetupComplete will hide it
+                    let hasMicrophone = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+                    if hasMicrophone {
+                        self?.setupWindow?.hide()
+                        self?.setupWindow = nil
+                    }
                     self?.setIconNormal()
                 } else {
                     self?.setIconLoading()
@@ -175,6 +192,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Global Hotkey
 
     private func setupGlobalHotkey() {
+        // Don't create a second tap if one already exists
+        if eventTap != nil { return }
+
         let eventMask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue) |
                                      (1 << CGEventType.keyDown.rawValue) |
                                      (1 << CGEventType.keyUp.rawValue)
