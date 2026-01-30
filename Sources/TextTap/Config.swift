@@ -192,7 +192,7 @@ struct IndicatorConfig {
     var offsetX: CGFloat = 8
     var offsetY: CGFloat = 0
     var barCount: Int = 9
-    var bgColor: String = "systemBlue"  // Apple blue
+    var bgColor: String = "systemBlue"
     var fgColor: String = "white"
 }
 
