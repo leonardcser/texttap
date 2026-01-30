@@ -2,6 +2,7 @@ import AVFoundation
 import Foundation
 
 class AudioRecorder {
+    private static let sampleRate: Double = 16000  // Whisper expects 16kHz
     private var audioEngine: AVAudioEngine?
     private var audioFile: AVAudioFile?
     private var tempFileURL: URL?
@@ -25,7 +26,7 @@ class AudioRecorder {
         // Create audio file with the desired format (16kHz mono for Whisper)
         let outputFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
-            sampleRate: Config.shared.audio.sampleRate,
+            sampleRate: Self.sampleRate,
             channels: 1,
             interleaved: false
         )!

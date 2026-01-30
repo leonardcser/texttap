@@ -12,8 +12,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     // Hotkey detection
     private var eventTap: CFMachPort?
-    private var lastCmdUpTime: Date?
-    private var cmdWasPressed = false
+    private var lastKeyUpTime: Date?
+    private var keyWasPressed = false
 
     // MARK: - Application Lifecycle
 
@@ -43,7 +43,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Create a circle icon using SF Symbols
         if let icon = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "TextTap") {
-            icon.size = NSSize(width: 14, height: 14)
+            icon.size = NSSize(width: 12, height: 12)
             normalIcon = icon
             setIconLoading()  // Start in loading state
         }
@@ -89,7 +89,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func setIconNormal() {
         if let icon = normalIcon {
-            let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
+            let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
             let configuredIcon = icon.withSymbolConfiguration(config) ?? icon
             configuredIcon.isTemplate = true
             statusItem.button?.image = configuredIcon
@@ -99,7 +99,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func setIconActive() {
         if let icon = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "TextTap Active") {
-            let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .bold)
+            let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .bold)
                 .applying(.init(paletteColors: [.systemRed]))
             let configuredIcon = icon.withSymbolConfiguration(config) ?? icon
             configuredIcon.isTemplate = false
@@ -110,7 +110,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     func setIconLoading() {
         if let icon = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "TextTap Loading") {
-            let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .regular)
+            let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
             let configuredIcon = icon.withSymbolConfiguration(config) ?? icon
             configuredIcon.isTemplate = true
             statusItem.button?.image = configuredIcon
@@ -135,7 +135,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func toggleDictation() {
         // Check if model is still loading
         if isModelLoading {
-            print("[AppDelegate] Model still loading, ignoring dictation toggle")
             return
         }
 
@@ -161,10 +160,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    // MARK: - Global Hotkey (Double-tap Cmd + Esc)
+    // MARK: - Global Hotkey
 
     private func setupGlobalHotkey() {
-        let eventMask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue) | (1 << CGEventType.keyDown.rawValue)
+        let eventMask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue) |
+                                     (1 << CGEventType.keyDown.rawValue) |
+                                     (1 << CGEventType.keyUp.rawValue)
 
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
@@ -196,46 +197,130 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleGlobalEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
-        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         let flags = event.flags
+        let config = Config.shared.hotkey
 
         // Handle Esc key while dictation is active - CANCEL (no paste)
-        if type == .keyDown && keyCode == 53 && dictationManager.isActive {
+        if type == .keyDown && keyCode == 0x35 && dictationManager.isActive {
             DispatchQueue.main.async {
-                print("[AppDelegate] Esc pressed - canceling dictation")
-                self.dictationManager.stop()  // Cancel without pasting
+                self.dictationManager.stop()
             }
-            return nil // Consume the event
+            return nil
         }
 
-        // Handle Cmd key for double-tap detection
-        if type == .flagsChanged {
-            let cmdPressed = flags.contains(.maskCommand)
+        switch config.mode {
+        case .doubleTap:
+            return handleDoubleTapMode(type: type, keyCode: keyCode, flags: flags, config: config, event: event)
+        case .shortcut:
+            return handleShortcutMode(type: type, keyCode: keyCode, flags: flags, config: config, event: event)
+        }
+    }
 
-            // Detect Cmd key release (transition from pressed to not pressed)
-            if cmdWasPressed && !cmdPressed {
-                let now = Date()
-                if let lastUp = lastCmdUpTime {
-                    let interval = now.timeIntervalSince(lastUp)
-                    if interval < Config.shared.hotkey.doubleTapInterval {
-                        // Double-tap detected - toggle or paste
-                        DispatchQueue.main.async {
-                            if self.dictationManager.isActive {
-                                print("[AppDelegate] Double-tap Cmd - stopping and pasting")
-                                self.dictationManager.stopAndPaste()
-                            } else {
-                                self.toggleDictation()
-                            }
-                        }
-                        lastCmdUpTime = nil
-                    } else {
-                        lastCmdUpTime = now
-                    }
+    private func handleDoubleTapMode(type: CGEventType, keyCode: UInt16, flags: CGEventFlags,
+                                     config: HotkeyConfig, event: CGEvent) -> Unmanaged<CGEvent>? {
+        let key = config.key
+
+        if HotkeyConfig.isModifier(key) {
+            // Handle modifier key double-tap (e.g., Command, Option, Control, Shift)
+            guard let targetFlag = HotkeyConfig.modifierFlag(for: key) else {
+                return Unmanaged.passUnretained(event)
+            }
+
+            if type == .flagsChanged {
+                let keyPressed: Bool
+                if let deviceMask = HotkeyConfig.deviceModifierMask(for: key) {
+                    // Side-specific modifier (e.g., leftcmd, rightcmd)
+                    keyPressed = (flags.rawValue & deviceMask) != 0
                 } else {
-                    lastCmdUpTime = now
+                    // Generic modifier (e.g., cmd, shift)
+                    keyPressed = flags.contains(targetFlag)
+                }
+
+                // Detect key release (transition from pressed to not pressed)
+                if keyWasPressed && !keyPressed {
+                    handleDoubleTapRelease(config: config)
+                }
+                keyWasPressed = keyPressed
+            }
+        } else {
+            // Handle regular key double-tap (e.g., F1, Escape, etc.)
+            guard let targetKeyCode = HotkeyConfig.keyCode(for: key) else {
+                return Unmanaged.passUnretained(event)
+            }
+
+            if keyCode == targetKeyCode {
+                if type == .keyDown && !keyWasPressed {
+                    keyWasPressed = true
+                } else if type == .keyUp && keyWasPressed {
+                    keyWasPressed = false
+                    handleDoubleTapRelease(config: config)
                 }
             }
-            cmdWasPressed = cmdPressed
+        }
+
+        return Unmanaged.passUnretained(event)
+    }
+
+    private func handleDoubleTapRelease(config: HotkeyConfig) {
+        let now = Date()
+        if let lastUp = lastKeyUpTime {
+            let interval = now.timeIntervalSince(lastUp)
+            if interval < config.doubleTapInterval {
+                // Double-tap detected - toggle or paste
+                DispatchQueue.main.async {
+                    if self.dictationManager.isActive {
+                        self.dictationManager.stopAndPaste()
+                    } else {
+                        self.toggleDictation()
+                    }
+                }
+                lastKeyUpTime = nil
+            } else {
+                lastKeyUpTime = now
+            }
+        } else {
+            lastKeyUpTime = now
+        }
+    }
+
+    private func handleShortcutMode(type: CGEventType, keyCode: UInt16, flags: CGEventFlags,
+                                    config: HotkeyConfig, event: CGEvent) -> Unmanaged<CGEvent>? {
+        guard type == .keyDown else {
+            return Unmanaged.passUnretained(event)
+        }
+
+        // Parse the shortcut string (e.g., "cmd-shift-d")
+        guard let parsed = config.parsedShortcut,
+              let targetKeyCode = HotkeyConfig.keyCode(for: parsed.key) else {
+            return Unmanaged.passUnretained(event)
+        }
+
+        // Check if key matches
+        guard keyCode == targetKeyCode else {
+            return Unmanaged.passUnretained(event)
+        }
+
+        // Check if all required modifiers are pressed
+        var requiredFlags: CGEventFlags = []
+        for modifier in parsed.modifiers {
+            if let flag = HotkeyConfig.modifierFlag(for: modifier) {
+                requiredFlags.insert(flag)
+            }
+        }
+
+        // Verify all required modifiers are held
+        let hasAllModifiers = requiredFlags.isEmpty || flags.contains(requiredFlags)
+
+        if hasAllModifiers {
+            DispatchQueue.main.async {
+                if self.dictationManager.isActive {
+                    self.dictationManager.stopAndPaste()
+                } else {
+                    self.toggleDictation()
+                }
+            }
+            return nil
         }
 
         return Unmanaged.passUnretained(event)

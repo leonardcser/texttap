@@ -1,5 +1,12 @@
 import Foundation
 
+enum DictationState {
+    case idle
+    case recording
+    case loading       // Transcribing, first stop requested
+    case stopping      // Loading + second stop requested (will cancel)
+}
+
 class DictationManager {
     private let audioRecorder = AudioRecorder()
     private let silenceDetector = SilenceDetector()
@@ -8,9 +15,14 @@ class DictationManager {
     private let textInserter = TextInserter()
     private let transcriber = WhisperTranscriber()
 
+    // Whisper noise artifacts to filter out
+    private let noisePatterns: Set<String> = ["[", "]", "(", ")", ".", ",", "!", "?", "-", "—", "..."]
+
     private var currentAudioURL: URL?
     private var isTranscribing = false
     private var modelLoadTask: Task<Void, Never>?
+    private var transcriptionTask: Task<Void, Never>?
+    private var dictationState: DictationState = .idle
 
     var isActive = false
     var isModelLoaded = false
@@ -43,15 +55,13 @@ class DictationManager {
                 onModelStateChange?(false)
             }
             do {
-                print("[DictationManager] Loading Whisper model...")
                 try await transcriber.loadModel()
-                print("[DictationManager] Whisper model loaded successfully")
                 await MainActor.run {
                     isModelLoaded = true
                     onModelStateChange?(true)
                 }
             } catch {
-                print("[DictationManager] Failed to preload Whisper model: \(error)")
+                print("[TextTap] Failed to load model: \(error)")
                 await MainActor.run {
                     isModelLoaded = false
                     onModelStateChange?(true)
@@ -61,158 +71,232 @@ class DictationManager {
     }
 
     func start() {
-        guard !isActive else { return }
+        guard dictationState == .idle else { return }
 
-        print("[DictationManager] Starting dictation")
+        dictationState = .recording
         isActive = true
         silenceDetector.reset()
         cursorIndicator.reset()
+        cursorIndicator.setState(.recording)
 
         onStateChange?(true)
 
         do {
             currentAudioURL = try audioRecorder.startRecording()
-            print("[DictationManager] Recording started, file: \(currentAudioURL?.path ?? "nil")")
             cursorTracker.startTracking()
             cursorIndicator.show()
         } catch {
-            print("[DictationManager] Failed to start recording: \(error)")
+            print("[TextTap] Failed to start recording: \(error)")
             stop()
         }
     }
 
     func stop() {
-        guard isActive else { return }
+        switch dictationState {
+        case .idle:
+            return
 
-        print("[DictationManager] Stopping dictation (no paste)")
-        isActive = false
-        onStateChange?(false)
+        case .recording:
+            dictationState = .idle
+            isActive = false
+            onStateChange?(false)
 
-        _ = audioRecorder.stopRecording()
-        cursorTracker.stopTracking()
-        cursorIndicator.hide()
-        silenceDetector.reset()
+            _ = audioRecorder.stopRecording()
+            cursorTracker.stopTracking()
+            cursorIndicator.hide()
+            silenceDetector.reset()
 
-        audioRecorder.cleanup()
-        currentAudioURL = nil
+            audioRecorder.cleanup()
+            currentAudioURL = nil
+
+        case .loading:
+            dictationState = .stopping
+
+        case .stopping:
+            transcriptionTask?.cancel()
+            transcriptionTask = nil
+            finishAndCleanup()
+        }
     }
 
     func stopAndPaste() {
-        guard isActive else { return }
+        switch dictationState {
+        case .idle:
+            return
 
-        print("[DictationManager] Stopping dictation and pasting")
-        let audioURL = audioRecorder.stopRecording()
-        cursorTracker.stopTracking()
-        cursorIndicator.hide()
+        case .recording:
+            let audioURL = audioRecorder.stopRecording()
+            silenceDetector.reset()
 
-        isActive = false
-        onStateChange?(false)
+            dictationState = .loading
+            cursorIndicator.setState(.loading)
+            isActive = false
+            onStateChange?(false)
 
-        if let url = audioURL {
-            print("[DictationManager] Final audio file: \(url.path)")
-            Task {
-                await transcribeAndInsert(url: url)
+            if let url = audioURL {
+                transcriptionTask = Task {
+                    await transcribeAndInsert(url: url)
+                }
+            } else {
+                finishAndCleanup()
             }
+
+        case .loading:
+            dictationState = .stopping
+
+        case .stopping:
+            transcriptionTask?.cancel()
+            transcriptionTask = nil
+            finishAndCleanup()
         }
     }
 
+    private func finishAndCleanup() {
+        dictationState = .idle
+        isActive = false
+        onStateChange?(false)
+
+        cursorTracker.stopTracking()
+        cursorIndicator.hide()
+
+        audioRecorder.cleanup()
+        currentAudioURL = nil
+        isTranscribing = false
+    }
+
     private func handleSilenceDetected() {
-        print("[DictationManager] handleSilenceDetected called, isActive: \(isActive), isTranscribing: \(isTranscribing)")
-        guard isActive, !isTranscribing else {
-            print("[DictationManager] Ignoring silence - not active or already transcribing")
-            return
-        }
+        guard dictationState == .recording, !isTranscribing else { return }
+        guard let audioURL = audioRecorder.stopRecording() else { return }
 
-        guard let audioURL = audioRecorder.stopRecording() else {
-            print("[DictationManager] No audio URL from stopRecording")
-            return
-        }
-
-        print("[DictationManager] Got audio file for transcription: \(audioURL.path)")
         isTranscribing = true
+        dictationState = .loading
+        cursorIndicator.setState(.loading)
 
-        Task {
+        transcriptionTask = Task {
             await transcribeAndContinue(url: audioURL)
         }
     }
 
     private func transcribeAndContinue(url: URL) async {
-        print("[DictationManager] transcribeAndContinue starting")
-
         if let task = modelLoadTask {
             await task.value
         }
 
+        if Task.isCancelled {
+            try? FileManager.default.removeItem(at: url)
+            await MainActor.run { finishAndCleanup() }
+            return
+        }
+
         guard await transcriber.isReady else {
-            print("[DictationManager] Transcriber not ready")
-            await MainActor.run { isTranscribing = false }
+            await MainActor.run {
+                isTranscribing = false
+                cursorIndicator.setState(.recording)
+            }
             return
         }
 
         do {
-            print("[DictationManager] Starting transcription...")
             let text = try await transcriber.transcribe(audioURL: url)
-            print("[DictationManager] Transcription completed: '\(text)'")
 
-            if !text.isEmpty {
+            if Task.isCancelled {
+                try? FileManager.default.removeItem(at: url)
+                await MainActor.run { finishAndCleanup() }
+                return
+            }
+
+            if !isNoiseTranscription(text) {
                 await MainActor.run {
                     textInserter.insertIncremental(text + " ")
                 }
             }
         } catch {
-            print("[DictationManager] Transcription failed: \(error)")
+            if Task.isCancelled {
+                try? FileManager.default.removeItem(at: url)
+                await MainActor.run { finishAndCleanup() }
+                return
+            }
         }
 
         try? FileManager.default.removeItem(at: url)
 
         await MainActor.run {
             isTranscribing = false
-            if self.isActive {
-                print("[DictationManager] Restarting recording after transcription")
-                self.silenceDetector.reset()
+
+            if dictationState == .stopping {
+                finishAndCleanup()
+                return
+            }
+
+            if dictationState == .loading && isActive {
+                dictationState = .recording
+                cursorIndicator.setState(.recording)
+                silenceDetector.reset()
                 do {
-                    self.currentAudioURL = try self.audioRecorder.startRecording()
+                    currentAudioURL = try audioRecorder.startRecording()
                 } catch {
-                    print("[DictationManager] Failed to restart recording: \(error)")
-                    self.stop()
+                    stop()
                 }
             }
         }
     }
 
     private func transcribeAndInsert(url: URL) async {
-        print("[DictationManager] transcribeAndInsert starting")
-
         if let task = modelLoadTask {
             await task.value
         }
 
+        if Task.isCancelled {
+            try? FileManager.default.removeItem(at: url)
+            await MainActor.run { finishAndCleanup() }
+            return
+        }
+
         if await transcriber.isReady {
             do {
-                print("[DictationManager] Final transcription...")
                 let text = try await transcriber.transcribe(audioURL: url)
-                print("[DictationManager] Final transcription result: '\(text)'")
 
-                if !text.isEmpty {
+                if Task.isCancelled {
+                    try? FileManager.default.removeItem(at: url)
+                    await MainActor.run { finishAndCleanup() }
+                    return
+                }
+
+                if !isNoiseTranscription(text) {
                     await MainActor.run {
                         textInserter.insertIncremental(text)
                     }
                 }
             } catch {
-                print("[DictationManager] Final transcription failed: \(error)")
+                // Silently handle errors
             }
         }
 
         try? FileManager.default.removeItem(at: url)
 
         await MainActor.run {
-            audioRecorder.cleanup()
-            currentAudioURL = nil
+            finishAndCleanup()
         }
     }
 
+    private func isNoiseTranscription(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespaces)
+        return trimmed.isEmpty || noisePatterns.contains(trimmed)
+    }
+
     func cleanup() {
-        stop()
+        transcriptionTask?.cancel()
+        transcriptionTask = nil
+        dictationState = .idle
+        isActive = false
+
+        _ = audioRecorder.stopRecording()
+        cursorTracker.stopTracking()
+        cursorIndicator.hide()
+        silenceDetector.reset()
+        audioRecorder.cleanup()
+        currentAudioURL = nil
+
         cursorIndicator.cleanup()
         modelLoadTask?.cancel()
     }

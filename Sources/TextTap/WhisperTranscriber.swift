@@ -9,26 +9,37 @@ actor WhisperTranscriber {
         whisperKit != nil
     }
 
+    private static let modelsDirectory: URL = {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return home.appendingPathComponent(".texttap/models")
+    }()
+
     func loadModel() async throws {
         guard !isLoading && whisperKit == nil else { return }
 
         isLoading = true
         defer { isLoading = false }
 
+        // Ensure models directory exists
+        try? FileManager.default.createDirectory(
+            at: Self.modelsDirectory,
+            withIntermediateDirectories: true
+        )
+
         let modelName = Config.shared.transcription.model
-        let config = WhisperKitConfig(model: modelName, load: true)
+        let config = WhisperKitConfig(
+            model: modelName,
+            downloadBase: Self.modelsDirectory,
+            load: true,
+            download: true
+        )
         whisperKit = try await WhisperKit(config)
     }
 
     // Artifacts to filter out
     private let artifactPatterns = [
-        #"\[BLANK_AUDIO\]"#,
-        #"\[\s*[Ss]ilence\s*\]"#,
-        #"\(\s*[Ss]ilence\s*\)"#,
-        #"\[\s*[Mm]usic\s*\]"#,
-        #"\(\s*[Mm]usic\s*\)"#,
-        #"\[\s*[Ii]naudible\s*\]"#,
-        #"\(\s*[Ii]naudible\s*\)"#,
+        #"\[[^\]]*\]"#,   // Anything in square brackets
+        #"\([^)]*\)"#,    // Anything in parentheses
         #"<\|[^|]*\|>"#,  // Special tokens like <|startoftranscript|>
     ]
 
@@ -48,7 +59,6 @@ actor WhisperTranscriber {
 
         let rawText = results.map { $0.text }.joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        print("[WhisperTranscriber] Raw result: '\(rawText)'")
 
         var text = rawText
 
@@ -63,12 +73,7 @@ actor WhisperTranscriber {
             }
         }
 
-        let filtered = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if filtered != rawText {
-            print("[WhisperTranscriber] Filtered result: '\(filtered)'")
-        }
-
-        return filtered
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     func unload() {

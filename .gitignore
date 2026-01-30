@@ -1,2 +1,8 @@
 .build/
 TextTap.app/
+
+# Generated icon files
+assets/Assets.car
+assets/AppIcon.icns
+assets/icon.png
+assets/icon@2x.png

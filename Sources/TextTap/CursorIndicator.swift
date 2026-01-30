@@ -1,13 +1,23 @@
 import Cocoa
 
+enum IndicatorState {
+    case recording
+    case loading
+}
+
 class CursorIndicator {
     private var panel: NSPanel?
     private var waveformView: WaveformView?
 
     private let config = Config.shared.indicator
+    private var currentState: IndicatorState = .recording
 
     var isVisible: Bool {
         panel?.isVisible ?? false
+    }
+
+    var state: IndicatorState {
+        currentState
     }
 
     func show() {
@@ -22,6 +32,7 @@ class CursorIndicator {
 
     func hide() {
         panel?.orderOut(nil)
+        setState(.recording)
     }
 
     func updatePosition(_ rect: NSRect?) {
@@ -39,6 +50,16 @@ class CursorIndicator {
 
     func reset() {
         waveformView?.reset()
+    }
+
+    func setState(_ state: IndicatorState) {
+        currentState = state
+        switch state {
+        case .recording:
+            waveformView?.setMode(.recording)
+        case .loading:
+            waveformView?.setMode(.loading)
+        }
     }
 
     func cleanup() {
@@ -79,13 +100,14 @@ class CursorIndicator {
         panel.contentView?.addSubview(backgroundView)
 
         // Create waveform view with padding
-        let padding: CGFloat = 6
+        let paddingX: CGFloat = 6
+        let paddingY: CGFloat = 3
         let waveform = WaveformView(barCount: config.barCount)
         waveform.frame = NSRect(
-            x: padding,
-            y: padding,
-            width: config.width - padding * 2,
-            height: config.height - padding * 2
+            x: paddingX,
+            y: paddingY,
+            width: config.width - paddingX * 2,
+            height: config.height - paddingY * 2
         )
         waveform.autoresizingMask = [.width, .height]
         waveform.accentColor = config.fgColor.toNSColor()

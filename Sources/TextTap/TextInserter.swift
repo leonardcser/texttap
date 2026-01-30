@@ -17,14 +17,11 @@ final class TextInserter: @unchecked Sendable {
         // Only attempt Accessibility API for known text input roles
         if let (element, role) = getFocusedElement(), textInputRoles.contains(role) {
             if insertTextViaAccessibility(element: element, text: text) {
-                print("[TextInserter] Inserted via Accessibility API (role: \(role)): '\(text)'")
                 return
             }
-            print("[TextInserter] Accessibility API failed verification, falling back to typing")
         }
 
         // Use typing for everything else - works universally including terminals
-        print("[TextInserter] Inserting via typing: '\(text)'")
         typeText(text)
     }
 
@@ -55,7 +52,6 @@ final class TextInserter: @unchecked Sendable {
             return nil
         }
 
-        print("[TextInserter] Focused element role: \(roleString)")
         return (axElement, roleString)
     }
 
@@ -93,7 +89,6 @@ final class TextInserter: @unchecked Sendable {
         // If we can read values and they're the same, the insert failed
         if let before = valueBefore, let after = valueAfter {
             if before == after {
-                print("[TextInserter] Value unchanged after Accessibility API call - insert failed silently")
                 return false
             }
         }

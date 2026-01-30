@@ -2,12 +2,51 @@
 # Copy to ~/.config/texttap/config.toml to customize
 
 [hotkey]
-double_tap_interval = 0.3     # Max seconds between taps to count as double-tap
+# Activation mode: "double_tap" or "shortcut"
+mode = "double_tap"
+
+# For double_tap mode: The key to double-tap
+# Supported: cmd, alt, ctrl, shift, fn (modifiers) or a-z, 0-9, f1-f12, escape, space, etc.
+key = "cmd"
+
+# For shortcut mode: Key combination using dash-separated format
+# Format: modifier-modifier-key (e.g., "cmd-shift-d", "ctrl-space", "alt-f1")
+# Modifiers: cmd, alt, ctrl, shift
+# Keys: a-z, 0-9, f1-f12, escape, space, tab, return, delete
+shortcut = "cmd-shift-d"
+
+# Max seconds between taps (only for double_tap mode)
+double_tap_interval = 0.3
+
+# Examples:
+#
+# Double-tap Command (default):
+#   mode = "double_tap"
+#   key = "cmd"
+#
+# Double-tap Option/Alt key:
+#   mode = "double_tap"
+#   key = "alt"
+#
+# Double-tap Fn key:
+#   mode = "double_tap"
+#   key = "fn"
+#
+# Shortcut Cmd+Shift+D:
+#   mode = "shortcut"
+#   shortcut = "cmd-shift-d"
+#
+# Shortcut Ctrl+Space:
+#   mode = "shortcut"
+#   shortcut = "ctrl-space"
+#
+# Shortcut Alt+F1:
+#   mode = "shortcut"
+#   shortcut = "alt-f1"
 
 [audio]
 silence_threshold = 0.01      # RMS threshold for silence (0.0-1.0)
 silence_duration = 1.0        # Seconds of silence before transcribing
-sample_rate = 16000           # Audio sample rate (Whisper expects 16kHz)
 
 [transcription]
 model = "small.en"            # Whisper model: tiny, base, small, medium, large-v3
