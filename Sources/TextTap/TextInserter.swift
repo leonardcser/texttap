@@ -12,17 +12,27 @@ final class TextInserter: @unchecked Sendable {
     ]
 
     func insertIncremental(_ text: String) {
-        guard !text.isEmpty else { return }
+        print("[TextTap] insertIncremental called with '\(text)' (length: \(text.count))")
+        guard !text.isEmpty else {
+            print("[TextTap] Text is empty, nothing to insert")
+            return
+        }
 
         // Only attempt Accessibility API for known text input roles
         if let (element, role) = getFocusedElement(), textInputRoles.contains(role) {
+            print("[TextTap] Focused element has role: \(role), trying Accessibility API")
             if insertTextViaAccessibility(element: element, text: text) {
+                print("[TextTap] Accessibility API insertion succeeded")
                 return
             }
+            print("[TextTap] Accessibility API insertion failed, falling back to keyboard")
+        } else {
+            print("[TextTap] No text input element focused or unknown role, using keyboard simulation")
         }
 
         // Use typing for everything else - works universally including terminals
         typeText(text)
+        print("[TextTap] Keyboard simulation completed")
     }
 
     private func getFocusedElement() -> (AXUIElement, String)? {

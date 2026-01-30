@@ -120,8 +120,10 @@ class DictationManager {
     }
 
     func stopAndPaste() {
+        print("[TextTap] stopAndPaste called, state=\(dictationState)")
         switch dictationState {
         case .idle:
+            print("[TextTap] Already idle, nothing to do")
             return
 
         case .recording:
@@ -134,10 +136,16 @@ class DictationManager {
             onStateChange?(false)
 
             if let url = audioURL {
+                // Log file size
+                if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+                   let fileSize = attrs[.size] as? Int64 {
+                    print("[TextTap] Audio file ready: \(url.lastPathComponent), size: \(fileSize) bytes")
+                }
                 transcriptionTask = Task {
                     await transcribeAndInsert(url: url)
                 }
             } else {
+                print("[TextTap] No audio URL returned from stopRecording")
                 finishAndCleanup()
             }
 
@@ -165,8 +173,21 @@ class DictationManager {
     }
 
     private func handleSilenceDetected() {
-        guard dictationState == .recording, !isTranscribing else { return }
-        guard let audioURL = audioRecorder.stopRecording() else { return }
+        print("[TextTap] Silence detected, state=\(dictationState), isTranscribing=\(isTranscribing)")
+        guard dictationState == .recording, !isTranscribing else {
+            print("[TextTap] Ignoring silence: wrong state or already transcribing")
+            return
+        }
+        guard let audioURL = audioRecorder.stopRecording() else {
+            print("[TextTap] Failed to get audio URL from stopRecording")
+            return
+        }
+
+        // Log file size
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: audioURL.path),
+           let fileSize = attrs[.size] as? Int64 {
+            print("[TextTap] Audio file size: \(fileSize) bytes")
+        }
 
         isTranscribing = true
         dictationState = .loading
@@ -178,17 +199,21 @@ class DictationManager {
     }
 
     private func transcribeAndContinue(url: URL) async {
+        print("[TextTap] transcribeAndContinue starting for \(url.lastPathComponent)")
         if let task = modelLoadTask {
+            print("[TextTap] Waiting for model to load...")
             await task.value
         }
 
         if Task.isCancelled {
+            print("[TextTap] Task cancelled before transcription")
             try? FileManager.default.removeItem(at: url)
             await MainActor.run { finishAndCleanup() }
             return
         }
 
         guard await transcriber.isReady else {
+            print("[TextTap] Transcriber not ready, skipping")
             await MainActor.run {
                 isTranscribing = false
                 cursorIndicator.setState(.recording)
@@ -198,19 +223,25 @@ class DictationManager {
 
         do {
             let text = try await transcriber.transcribe(audioURL: url)
+            print("[TextTap] Transcription result: '\(text)' (length: \(text.count))")
 
             if Task.isCancelled {
+                print("[TextTap] Task cancelled after transcription")
                 try? FileManager.default.removeItem(at: url)
                 await MainActor.run { finishAndCleanup() }
                 return
             }
 
             if !isNoiseTranscription(text) {
+                print("[TextTap] Inserting text: '\(text + " ")'")
                 await MainActor.run {
                     textInserter.insertIncremental(text + " ")
                 }
+            } else {
+                print("[TextTap] Filtered as noise: '\(text)'")
             }
         } catch {
+            print("[TextTap] Transcription error: \(error)")
             if Task.isCancelled {
                 try? FileManager.default.removeItem(at: url)
                 await MainActor.run { finishAndCleanup() }
@@ -242,11 +273,21 @@ class DictationManager {
     }
 
     private func transcribeAndInsert(url: URL) async {
+        print("[TextTap] transcribeAndInsert starting for \(url.lastPathComponent)")
+
+        // Log file size
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+           let fileSize = attrs[.size] as? Int64 {
+            print("[TextTap] Audio file size: \(fileSize) bytes")
+        }
+
         if let task = modelLoadTask {
+            print("[TextTap] Waiting for model to load...")
             await task.value
         }
 
         if Task.isCancelled {
+            print("[TextTap] Task cancelled before transcription")
             try? FileManager.default.removeItem(at: url)
             await MainActor.run { finishAndCleanup() }
             return
@@ -255,21 +296,28 @@ class DictationManager {
         if await transcriber.isReady {
             do {
                 let text = try await transcriber.transcribe(audioURL: url)
+                print("[TextTap] Transcription result: '\(text)' (length: \(text.count))")
 
                 if Task.isCancelled {
+                    print("[TextTap] Task cancelled after transcription")
                     try? FileManager.default.removeItem(at: url)
                     await MainActor.run { finishAndCleanup() }
                     return
                 }
 
                 if !isNoiseTranscription(text) {
+                    print("[TextTap] Inserting text: '\(text)'")
                     await MainActor.run {
                         textInserter.insertIncremental(text)
                     }
+                } else {
+                    print("[TextTap] Filtered as noise: '\(text)'")
                 }
             } catch {
-                // Silently handle errors
+                print("[TextTap] Transcription error: \(error)")
             }
+        } else {
+            print("[TextTap] Transcriber not ready, skipping transcription")
         }
 
         try? FileManager.default.removeItem(at: url)

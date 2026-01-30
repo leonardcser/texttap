@@ -1,5 +1,6 @@
 import Cocoa
 import ApplicationServices
+import AVFoundation
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Properties
@@ -9,6 +10,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var dictationManager: DictationManager!
     var normalIcon: NSImage?
     var isModelLoading = true
+    var setupWindow: SetupWindow?
 
     // Hotkey detection
     private var eventTap: CFMachPort?
@@ -20,8 +22,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         setupStatusItem()
         setupMenu()
+        showSetupWindowIfNeeded()
         setupDictationManager()
         setupGlobalHotkey()
+    }
+
+    private func showSetupWindowIfNeeded() {
+        if SetupWindow.needsSetup {
+            setupWindow = SetupWindow()
+            setupWindow?.show()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
@@ -77,6 +87,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async {
                 self?.isModelLoading = !isLoaded
                 if isLoaded {
+                    self?.setupWindow?.hide()
+                    self?.setupWindow = nil
                     self?.setIconNormal()
                 } else {
                     self?.setIconLoading()
@@ -382,5 +394,3 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 }
-
-import AVFoundation

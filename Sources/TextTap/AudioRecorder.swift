@@ -11,17 +11,20 @@ class AudioRecorder {
     var isRecording: Bool { audioEngine?.isRunning ?? false }
 
     func startRecording() throws -> URL {
+        print("[TextTap] AudioRecorder.startRecording() called")
         let audioEngine = AVAudioEngine()
         self.audioEngine = audioEngine
 
         let inputNode = audioEngine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
+        print("[TextTap] Input format: \(inputFormat.sampleRate)Hz, \(inputFormat.channelCount) channels")
 
         // Create temp file for recording
         let tempDir = FileManager.default.temporaryDirectory
         let fileName = "texttap_\(Int(Date().timeIntervalSince1970)).wav"
         let fileURL = tempDir.appendingPathComponent(fileName)
         tempFileURL = fileURL
+        print("[TextTap] Recording to: \(fileURL.path)")
 
         // Create audio file with the desired format (16kHz mono for Whisper)
         let outputFormat = AVAudioFormat(
@@ -40,10 +43,13 @@ class AudioRecorder {
 
         // Create a converter if needed
         let converter = AVAudioConverter(from: inputFormat, to: outputFormat)
+        var bufferCount = 0
+        var writeErrorCount = 0
 
         // Install tap on input node
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, time in
             guard let self = self else { return }
+            bufferCount += 1
 
             // Calculate RMS level
             let level = self.calculateRMS(buffer: buffer)
@@ -57,6 +63,7 @@ class AudioRecorder {
                     Double(buffer.frameLength) * outputFormat.sampleRate / inputFormat.sampleRate
                 )
                 guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frameCount) else {
+                    print("[TextTap] Failed to create converted buffer")
                     return
                 }
 
@@ -68,20 +75,41 @@ class AudioRecorder {
 
                 converter.convert(to: convertedBuffer, error: &error, withInputFrom: inputBlock)
 
-                if error == nil {
-                    try? self.audioFile?.write(from: convertedBuffer)
+                if let error = error {
+                    writeErrorCount += 1
+                    if writeErrorCount <= 5 {
+                        print("[TextTap] Audio conversion error: \(error)")
+                    }
+                } else {
+                    do {
+                        try self.audioFile?.write(from: convertedBuffer)
+                    } catch {
+                        writeErrorCount += 1
+                        if writeErrorCount <= 5 {
+                            print("[TextTap] Audio write error: \(error)")
+                        }
+                    }
                 }
             } else {
                 // Format matches, write directly
-                try? self.audioFile?.write(from: buffer)
+                do {
+                    try self.audioFile?.write(from: buffer)
+                } catch {
+                    writeErrorCount += 1
+                    if writeErrorCount <= 5 {
+                        print("[TextTap] Audio write error: \(error)")
+                    }
+                }
             }
         }
 
         try audioEngine.start()
+        print("[TextTap] Audio engine started")
         return fileURL
     }
 
     func stopRecording() -> URL? {
+        print("[TextTap] AudioRecorder.stopRecording() called")
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
         audioEngine = nil
@@ -94,6 +122,12 @@ class AudioRecorder {
             if fd >= 0 {
                 fsync(fd)
                 close(fd)
+            }
+
+            // Log file info
+            if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+               let fileSize = attrs[.size] as? Int64 {
+                print("[TextTap] Recording stopped. File: \(url.lastPathComponent), size: \(fileSize) bytes")
             }
         }
 

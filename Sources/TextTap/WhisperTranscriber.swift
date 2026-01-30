@@ -9,9 +9,9 @@ actor WhisperTranscriber {
         whisperKit != nil
     }
 
-    private static let modelsDirectory: URL = {
+    private static let baseDirectory: URL = {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appendingPathComponent(".texttap/models")
+        return home.appendingPathComponent(".texttap")
     }()
 
     func loadModel() async throws {
@@ -20,16 +20,15 @@ actor WhisperTranscriber {
         isLoading = true
         defer { isLoading = false }
 
-        // Ensure models directory exists
         try? FileManager.default.createDirectory(
-            at: Self.modelsDirectory,
+            at: Self.baseDirectory,
             withIntermediateDirectories: true
         )
 
         let modelName = Config.shared.transcription.model
         let config = WhisperKitConfig(
             model: modelName,
-            downloadBase: Self.modelsDirectory,
+            downloadBase: Self.baseDirectory,
             load: true,
             download: true
         )
@@ -45,6 +44,7 @@ actor WhisperTranscriber {
 
     func transcribe(audioURL: URL) async throws -> String {
         guard let whisperKit = whisperKit else {
+            print("[TextTap] WhisperKit not initialized")
             throw TranscriptionError.modelNotLoaded
         }
 
@@ -52,28 +52,42 @@ actor WhisperTranscriber {
             language: Config.shared.transcription.language
         )
 
+        print("[TextTap] Starting WhisperKit transcription for \(audioURL.lastPathComponent)")
         let results = try await whisperKit.transcribe(
             audioPath: audioURL.path,
             decodeOptions: options
         )
 
+        print("[TextTap] WhisperKit returned \(results.count) segment(s)")
+        for (i, segment) in results.enumerated() {
+            print("[TextTap]   Segment \(i): '\(segment.text)'")
+        }
+
         let rawText = results.map { $0.text }.joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        print("[TextTap] Raw joined text: '\(rawText)' (length: \(rawText.count))")
 
         var text = rawText
 
         // Filter out artifacts
         for pattern in artifactPatterns {
             if let regex = try? NSRegularExpression(pattern: pattern, options: .caseInsensitive) {
+                let before = text
                 text = regex.stringByReplacingMatches(
                     in: text,
                     range: NSRange(text.startIndex..., in: text),
                     withTemplate: ""
                 )
+                if before != text {
+                    print("[TextTap] Artifact filter '\(pattern)' changed: '\(before)' -> '\(text)'")
+                }
             }
         }
 
-        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        print("[TextTap] Final transcription: '\(finalText)' (length: \(finalText.count))")
+        return finalText
     }
 
     func unload() {
