@@ -1,0 +1,24 @@
+# TextTap Configuration
+# Copy to ~/.config/texttap/config.toml to customize
+
+[hotkey]
+double_tap_interval = 0.3     # Max seconds between taps to count as double-tap
+
+[audio]
+silence_threshold = 0.01      # RMS threshold for silence (0.0-1.0)
+silence_duration = 1.0        # Seconds of silence before transcribing
+sample_rate = 16000           # Audio sample rate (Whisper expects 16kHz)
+
+[transcription]
+model = "small.en"            # Whisper model: tiny, base, small, medium, large-v3
+language = "en"               # Language code
+
+[indicator]
+enabled = true                # Show waveform indicator near cursor
+width = 44                    # Indicator width in pixels
+height = 18                   # Indicator height in pixels
+offset_x = 8                  # Horizontal offset from cursor
+offset_y = 0                  # Vertical offset from cursor
+bar_count = 9                 # Number of waveform bars
+bg_color = "systemBlue"       # Background color (systemBlue, white, #FF0000, etc.)
+fg_color = "white"            # Foreground/waveform color
