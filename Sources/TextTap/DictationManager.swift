@@ -106,6 +106,11 @@ class DictationManager {
             cursorIndicator.hide()
             silenceDetector.reset()
 
+            // Cancel any background transcription from silence detection
+            transcriptionTask?.cancel()
+            transcriptionTask = nil
+            isTranscribing = false
+
             audioRecorder.cleanup()
             currentAudioURL = nil
 
@@ -190,8 +195,17 @@ class DictationManager {
         }
 
         isTranscribing = true
-        dictationState = .loading
-        cursorIndicator.setState(.loading)
+
+        // Immediately restart recording so we don't lose audio during transcription
+        silenceDetector.reset()
+        do {
+            currentAudioURL = try audioRecorder.startRecording()
+            print("[TextTap] Recording restarted immediately after silence detection")
+        } catch {
+            print("[TextTap] Failed to restart recording: \(error)")
+            dictationState = .loading
+            cursorIndicator.setState(.loading)
+        }
 
         transcriptionTask = Task {
             await transcribeAndContinue(url: audioURL)
@@ -208,7 +222,6 @@ class DictationManager {
         if Task.isCancelled {
             print("[TextTap] Task cancelled before transcription")
             try? FileManager.default.removeItem(at: url)
-            await MainActor.run { finishAndCleanup() }
             return
         }
 
@@ -216,7 +229,6 @@ class DictationManager {
             print("[TextTap] Transcriber not ready, skipping")
             await MainActor.run {
                 isTranscribing = false
-                cursorIndicator.setState(.recording)
             }
             return
         }
@@ -228,7 +240,6 @@ class DictationManager {
             if Task.isCancelled {
                 print("[TextTap] Task cancelled after transcription")
                 try? FileManager.default.removeItem(at: url)
-                await MainActor.run { finishAndCleanup() }
                 return
             }
 
@@ -244,7 +255,6 @@ class DictationManager {
             print("[TextTap] Transcription error: \(error)")
             if Task.isCancelled {
                 try? FileManager.default.removeItem(at: url)
-                await MainActor.run { finishAndCleanup() }
                 return
             }
         }
@@ -253,22 +263,6 @@ class DictationManager {
 
         await MainActor.run {
             isTranscribing = false
-
-            if dictationState == .stopping {
-                finishAndCleanup()
-                return
-            }
-
-            if dictationState == .loading && isActive {
-                dictationState = .recording
-                cursorIndicator.setState(.recording)
-                silenceDetector.reset()
-                do {
-                    currentAudioURL = try audioRecorder.startRecording()
-                } catch {
-                    stop()
-                }
-            }
         }
     }
 
