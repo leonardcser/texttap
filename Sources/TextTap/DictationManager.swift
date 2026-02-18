@@ -19,9 +19,10 @@ class DictationManager {
     private let noisePatterns: Set<String> = ["[", "]", "(", ")", ".", ",", "!", "?", "-", "—", "..."]
 
     private var currentAudioURL: URL?
-    private var isTranscribing = false
+    private var pendingSegments: [URL] = []
+    private var processingTask: Task<Void, Never>?
+    private var isFinalSegmentQueued = false
     private var modelLoadTask: Task<Void, Never>?
-    private var transcriptionTask: Task<Void, Never>?
     private var dictationState: DictationState = .idle
 
     var isActive = false
@@ -106,10 +107,14 @@ class DictationManager {
             cursorIndicator.hide()
             silenceDetector.reset()
 
-            // Cancel any background transcription from silence detection
-            transcriptionTask?.cancel()
-            transcriptionTask = nil
-            isTranscribing = false
+            processingTask?.cancel()
+            processingTask = nil
+
+            for url in pendingSegments {
+                try? FileManager.default.removeItem(at: url)
+            }
+            pendingSegments.removeAll()
+            isFinalSegmentQueued = false
 
             audioRecorder.cleanup()
             currentAudioURL = nil
@@ -118,8 +123,8 @@ class DictationManager {
             dictationState = .stopping
 
         case .stopping:
-            transcriptionTask?.cancel()
-            transcriptionTask = nil
+            processingTask?.cancel()
+            processingTask = nil
             finishAndCleanup()
         }
     }
@@ -141,14 +146,13 @@ class DictationManager {
             onStateChange?(false)
 
             if let url = audioURL {
-                // Log file size
                 if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
                    let fileSize = attrs[.size] as? Int64 {
                     print("[TextTap] Audio file ready: \(url.lastPathComponent), size: \(fileSize) bytes")
                 }
-                transcriptionTask = Task {
-                    await transcribeAndInsert(url: url)
-                }
+                pendingSegments.append(url)
+                isFinalSegmentQueued = true
+                startProcessingIfNeeded()
             } else {
                 print("[TextTap] No audio URL returned from stopRecording")
                 finishAndCleanup()
@@ -158,8 +162,8 @@ class DictationManager {
             dictationState = .stopping
 
         case .stopping:
-            transcriptionTask?.cancel()
-            transcriptionTask = nil
+            processingTask?.cancel()
+            processingTask = nil
             finishAndCleanup()
         }
     }
@@ -174,13 +178,17 @@ class DictationManager {
 
         audioRecorder.cleanup()
         currentAudioURL = nil
-        isTranscribing = false
+        pendingSegments.removeAll()
+        isFinalSegmentQueued = false
+        processingTask = nil
     }
 
+    // MARK: - Silence Detection & Segment Queue
+
     private func handleSilenceDetected() {
-        print("[TextTap] Silence detected, state=\(dictationState), isTranscribing=\(isTranscribing)")
-        guard dictationState == .recording, !isTranscribing else {
-            print("[TextTap] Ignoring silence: wrong state or already transcribing")
+        print("[TextTap] Silence detected, state=\(dictationState)")
+        guard dictationState == .recording else {
+            print("[TextTap] Ignoring silence: not recording")
             return
         }
         guard let audioURL = audioRecorder.stopRecording() else {
@@ -188,15 +196,13 @@ class DictationManager {
             return
         }
 
-        // Log file size
         if let attrs = try? FileManager.default.attributesOfItem(atPath: audioURL.path),
            let fileSize = attrs[.size] as? Int64 {
             print("[TextTap] Audio file size: \(fileSize) bytes")
         }
 
-        isTranscribing = true
+        pendingSegments.append(audioURL)
 
-        // Immediately restart recording so we don't lose audio during transcription
         silenceDetector.reset()
         do {
             currentAudioURL = try audioRecorder.startRecording()
@@ -207,13 +213,51 @@ class DictationManager {
             cursorIndicator.setState(.loading)
         }
 
-        transcriptionTask = Task {
-            await transcribeAndContinue(url: audioURL)
+        startProcessingIfNeeded()
+    }
+
+    private func startProcessingIfNeeded() {
+        guard processingTask == nil else { return }
+        processingTask = Task {
+            await processSegments()
         }
     }
 
-    private func transcribeAndContinue(url: URL) async {
-        print("[TextTap] transcribeAndContinue starting for \(url.lastPathComponent)")
+    private func processSegments() async {
+        while true {
+            if Task.isCancelled {
+                await MainActor.run {
+                    for url in pendingSegments {
+                        try? FileManager.default.removeItem(at: url)
+                    }
+                    pendingSegments.removeAll()
+                    processingTask = nil
+                }
+                return
+            }
+
+            let segment: (url: URL, isFinal: Bool)? = await MainActor.run {
+                if pendingSegments.isEmpty {
+                    if isFinalSegmentQueued {
+                        finishAndCleanup()
+                    }
+                    processingTask = nil
+                    return nil
+                }
+                let url = pendingSegments.removeFirst()
+                let isFinal = pendingSegments.isEmpty && isFinalSegmentQueued
+                return (url, isFinal)
+            }
+
+            guard let segment = segment else { return }
+
+            await transcribeSegment(url: segment.url, isFinal: segment.isFinal)
+        }
+    }
+
+    private func transcribeSegment(url: URL, isFinal: Bool) async {
+        print("[TextTap] transcribeSegment starting for \(url.lastPathComponent), isFinal=\(isFinal)")
+
         if let task = modelLoadTask {
             print("[TextTap] Waiting for model to load...")
             await task.value
@@ -227,9 +271,7 @@ class DictationManager {
 
         guard await transcriber.isReady else {
             print("[TextTap] Transcriber not ready, skipping")
-            await MainActor.run {
-                isTranscribing = false
-            }
+            try? FileManager.default.removeItem(at: url)
             return
         }
 
@@ -238,86 +280,31 @@ class DictationManager {
             print("[TextTap] Transcription result: '\(text)' (length: \(text.count))")
 
             if Task.isCancelled {
-                print("[TextTap] Task cancelled after transcription")
                 try? FileManager.default.removeItem(at: url)
                 return
             }
 
             if !isNoiseTranscription(text) {
-                print("[TextTap] Inserting text: '\(text + " ")'")
+                let insertText = isFinal ? text : text + " "
+                print("[TextTap] Inserting text: '\(insertText)'")
                 await MainActor.run {
-                    textInserter.insertIncremental(text + " ")
+                    textInserter.insertIncremental(insertText)
                 }
             } else {
                 print("[TextTap] Filtered as noise: '\(text)'")
             }
         } catch {
             print("[TextTap] Transcription error: \(error)")
-            if Task.isCancelled {
-                try? FileManager.default.removeItem(at: url)
-                return
-            }
         }
 
         try? FileManager.default.removeItem(at: url)
 
-        await MainActor.run {
-            isTranscribing = false
-        }
-    }
-
-    private func transcribeAndInsert(url: URL) async {
-        print("[TextTap] transcribeAndInsert starting for \(url.lastPathComponent)")
-
-        // Log file size
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-           let fileSize = attrs[.size] as? Int64 {
-            print("[TextTap] Audio file size: \(fileSize) bytes")
-        }
-
-        if let task = modelLoadTask {
-            print("[TextTap] Waiting for model to load...")
-            await task.value
-        }
-
-        if Task.isCancelled {
-            print("[TextTap] Task cancelled before transcription")
-            try? FileManager.default.removeItem(at: url)
-            await MainActor.run { finishAndCleanup() }
-            return
-        }
-
-        if await transcriber.isReady {
-            do {
-                let text = try await transcriber.transcribe(audioURL: url)
-                print("[TextTap] Transcription result: '\(text)' (length: \(text.count))")
-
-                if Task.isCancelled {
-                    print("[TextTap] Task cancelled after transcription")
-                    try? FileManager.default.removeItem(at: url)
-                    await MainActor.run { finishAndCleanup() }
-                    return
+        if isFinal {
+            await MainActor.run {
+                if dictationState == .stopping {
+                    finishAndCleanup()
                 }
-
-                if !isNoiseTranscription(text) {
-                    print("[TextTap] Inserting text: '\(text)'")
-                    await MainActor.run {
-                        textInserter.insertIncremental(text)
-                    }
-                } else {
-                    print("[TextTap] Filtered as noise: '\(text)'")
-                }
-            } catch {
-                print("[TextTap] Transcription error: \(error)")
             }
-        } else {
-            print("[TextTap] Transcriber not ready, skipping transcription")
-        }
-
-        try? FileManager.default.removeItem(at: url)
-
-        await MainActor.run {
-            finishAndCleanup()
         }
     }
 
@@ -327,8 +314,8 @@ class DictationManager {
     }
 
     func cleanup() {
-        transcriptionTask?.cancel()
-        transcriptionTask = nil
+        processingTask?.cancel()
+        processingTask = nil
         dictationState = .idle
         isActive = false
 
@@ -336,6 +323,13 @@ class DictationManager {
         cursorTracker.stopTracking()
         cursorIndicator.hide()
         silenceDetector.reset()
+
+        for url in pendingSegments {
+            try? FileManager.default.removeItem(at: url)
+        }
+        pendingSegments.removeAll()
+        isFinalSegmentQueued = false
+
         audioRecorder.cleanup()
         currentAudioURL = nil
 
