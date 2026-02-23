@@ -28,6 +28,7 @@ class DictationManager {
     var isActive = false
     var isModelLoaded = false
     var onStateChange: ((Bool) -> Void)?
+    var onTranscribingChange: ((Bool) -> Void)?
     var onModelStateChange: ((Bool) -> Void)?
 
     init() {
@@ -144,6 +145,7 @@ class DictationManager {
             cursorIndicator.setState(.loading)
             isActive = false
             onStateChange?(false)
+            onTranscribingChange?(true)
 
             if let url = audioURL {
                 if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
@@ -172,6 +174,7 @@ class DictationManager {
         dictationState = .idle
         isActive = false
         onStateChange?(false)
+        onTranscribingChange?(false)
 
         cursorTracker.stopTracking()
         cursorIndicator.hide()
@@ -211,6 +214,7 @@ class DictationManager {
             print("[TextTap] Failed to restart recording: \(error)")
             dictationState = .loading
             cursorIndicator.setState(.loading)
+            onTranscribingChange?(true)
         }
 
         startProcessingIfNeeded()

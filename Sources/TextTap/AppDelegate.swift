@@ -95,6 +95,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
         }
+        dictationManager.onTranscribingChange = { [weak self] isTranscribing in
+            DispatchQueue.main.async {
+                if isTranscribing {
+                    self?.setIconTranscribing()
+                } else {
+                    self?.setIconNormal()
+                }
+            }
+        }
         dictationManager.onModelStateChange = { [weak self] isLoaded in
             DispatchQueue.main.async {
                 self?.isModelLoading = !isLoaded
@@ -134,6 +143,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             configuredIcon.isTemplate = false
             statusItem.button?.image = configuredIcon
             statusItem.button?.appearsDisabled = false
+        }
+    }
+
+    func setIconTranscribing() {
+        if let icon = normalIcon {
+            let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
+            let configuredIcon = icon.withSymbolConfiguration(config) ?? icon
+            configuredIcon.isTemplate = true
+            statusItem.button?.image = configuredIcon
+            statusItem.button?.appearsDisabled = true
         }
     }
 
