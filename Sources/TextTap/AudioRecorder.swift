@@ -6,6 +6,7 @@ class AudioRecorder {
     private var audioEngine: AVAudioEngine?
     private var audioFile: AVAudioFile?
     private var tempFileURL: URL?
+    private var recordingGeneration: Int = 0
 
     var onAudioLevel: ((Float) -> Void)?
     var isRecording: Bool { audioEngine?.isRunning ?? false }
@@ -34,30 +35,33 @@ class AudioRecorder {
             interleaved: false
         )!
 
-        audioFile = try AVAudioFile(
+        let file = try AVAudioFile(
             forWriting: fileURL,
             settings: outputFormat.settings,
             commonFormat: .pcmFormatFloat32,
             interleaved: false
         )
+        audioFile = file
 
         // Create a converter if needed
         let converter = AVAudioConverter(from: inputFormat, to: outputFormat)
-        var bufferCount = 0
         var writeErrorCount = 0
+        let generation = recordingGeneration
 
         // Install tap on input node
+        // Captures `file` directly so writes never race with stopRecording setting audioFile = nil.
+        // Captures `generation` to discard stale level callbacks after stop.
         inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, time in
             guard let self = self else { return }
-            bufferCount += 1
 
             // Calculate RMS level
             let level = self.calculateRMS(buffer: buffer)
-            DispatchQueue.main.async {
+            DispatchQueue.main.async { [weak self] in
+                guard let self = self, self.recordingGeneration == generation else { return }
                 self.onAudioLevel?(level)
             }
 
-            // Convert and write to file
+            // Convert and write to captured file reference (not self.audioFile)
             if let converter = converter {
                 let frameCount = AVAudioFrameCount(
                     Double(buffer.frameLength) * outputFormat.sampleRate / inputFormat.sampleRate
@@ -82,7 +86,7 @@ class AudioRecorder {
                     }
                 } else {
                     do {
-                        try self.audioFile?.write(from: convertedBuffer)
+                        try file.write(from: convertedBuffer)
                     } catch {
                         writeErrorCount += 1
                         if writeErrorCount <= 5 {
@@ -93,7 +97,7 @@ class AudioRecorder {
             } else {
                 // Format matches, write directly
                 do {
-                    try self.audioFile?.write(from: buffer)
+                    try file.write(from: buffer)
                 } catch {
                     writeErrorCount += 1
                     if writeErrorCount <= 5 {
@@ -110,14 +114,19 @@ class AudioRecorder {
 
     func stopRecording() -> URL? {
         print("[TextTap] AudioRecorder.stopRecording() called")
+        recordingGeneration += 1  // Invalidate pending level callbacks from this session
+
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
         audioEngine = nil
 
-        audioFile = nil  // Close the file
+        audioFile = nil  // Release our reference (tap closure may still hold the file briefly)
+
+        let url = tempFileURL
+        tempFileURL = nil  // Clear so cleanup() won't double-delete
 
         // Force file system sync to ensure all data is written to disk
-        if let url = tempFileURL {
+        if let url = url {
             let fd = open(url.path, O_RDONLY)
             if fd >= 0 {
                 fsync(fd)
@@ -131,7 +140,7 @@ class AudioRecorder {
             }
         }
 
-        return tempFileURL
+        return url
     }
 
     func cleanup() {
