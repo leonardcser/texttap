@@ -175,13 +175,8 @@ struct HotkeyConfig {
     }
 }
 
-struct AudioConfig {
-    var silenceThreshold: Float = 0.01
-    var silenceDuration: Double = 1.0
-}
-
 struct TranscriptionConfig {
-    var model: String = "small.en"
+    var model: String = "medium.en"
     var language: String = "en"
 }
 
@@ -198,7 +193,6 @@ struct IndicatorConfig {
 
 struct Config {
     var hotkey = HotkeyConfig()
-    var audio = AudioConfig()
     var transcription = TranscriptionConfig()
     var indicator = IndicatorConfig()
 
@@ -241,16 +235,6 @@ struct Config {
             }
             if let val = hotkeySection["double_tap_interval"] as? Double {
                 hotkey.doubleTapInterval = val
-            }
-        }
-
-        // Audio section
-        if let audioSection = parsed["audio"] as? [String: Any] {
-            if let val = audioSection["silence_threshold"] as? Double {
-                audio.silenceThreshold = Float(val)
-            }
-            if let val = audioSection["silence_duration"] as? Double {
-                audio.silenceDuration = val
             }
         }
 

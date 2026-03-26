@@ -3,19 +3,20 @@ import ApplicationServices
 import AVFoundation
 
 class AppDelegate: NSObject, NSApplicationDelegate {
-    // MARK: - Properties
-
     var statusItem: NSStatusItem!
     var statusBarMenu: StatusBarMenu!
     var dictationManager: DictationManager!
-    var normalIcon: NSImage?
-    var isModelLoading = true
     var setupWindow: SetupWindow?
 
     // Hotkey detection
     private var eventTap: CFMachPort?
-    private var lastKeyUpTime: Date?
-    private var keyWasPressed = false
+    private var lastTapTime: Date?
+    private var keyDownTime: Date?
+    private var holdTimer: DispatchSourceTimer?
+    private var isHoldActive = false
+    private var keyIsDown = false
+
+    private let holdThreshold: TimeInterval = 0.3
 
     // MARK: - Application Lifecycle
 
@@ -31,13 +32,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if SetupWindow.needsSetup {
             setupWindow = SetupWindow()
             setupWindow?.onAccessibilityGranted = { [weak self] in
-                // Now that accessibility is granted, set up the global hotkey
                 self?.setupGlobalHotkey()
             }
             setupWindow?.onSetupComplete = { [weak self] in
-                // If model is already loaded, hide the window now
-                // Otherwise, onModelStateChange will hide it when model loads
-                if self?.isModelLoading == false {
+                if self?.dictationManager?.isModelLoaded == true {
                     self?.setupWindow?.hide()
                     self?.setupWindow = nil
                 }
@@ -52,7 +50,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        return false
+        false
     }
 
     // MARK: - Setup
@@ -62,13 +60,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.target = self
         statusItem.button?.action = #selector(statusItemClicked(_:))
         statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
-
-        // Create a circle icon using SF Symbols
-        if let icon = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "TextTap") {
-            icon.size = NSSize(width: 12, height: 12)
-            normalIcon = icon
-            setIconLoading()  // Start in loading state
-        }
+        setIcon(for: .loading)
     }
 
     private func setupMenu() {
@@ -76,93 +68,69 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusBarMenu.onToggleDictation = { [weak self] in
             self?.toggleDictation()
         }
-        statusBarMenu.onReloadConfig = {
-            Config.reload()
-        }
-        statusBarMenu.onQuit = {
-            NSApplication.shared.terminate(nil)
-        }
+        statusBarMenu.onReloadConfig = { Config.reload() }
+        statusBarMenu.onQuit = { NSApplication.shared.terminate(nil) }
     }
 
     private func setupDictationManager() {
         dictationManager = DictationManager()
-        dictationManager.onStateChange = { [weak self] isActive in
-            DispatchQueue.main.async {
-                if isActive {
-                    self?.setIconActive()
-                } else {
-                    self?.setIconNormal()
-                }
-            }
-        }
-        dictationManager.onTranscribingChange = { [weak self] isTranscribing in
-            DispatchQueue.main.async {
-                if isTranscribing {
-                    self?.setIconTranscribing()
-                } else {
-                    self?.setIconNormal()
-                }
-            }
+        dictationManager.onStateChange = { [weak self] state in
+            DispatchQueue.main.async { self?.setIcon(for: state) }
         }
         dictationManager.onModelStateChange = { [weak self] isLoaded in
             DispatchQueue.main.async {
-                self?.isModelLoading = !isLoaded
                 if isLoaded {
-                    // Only hide setup window if microphone permission is already granted
-                    // Otherwise, let the setup flow complete and onSetupComplete will hide it
                     let hasMicrophone = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
                     if hasMicrophone {
                         self?.setupWindow?.hide()
                         self?.setupWindow = nil
                     }
-                    self?.setIconNormal()
-                } else {
-                    self?.setIconLoading()
                 }
+                self?.setIcon(for: isLoaded ? .idle : .loading)
             }
         }
     }
 
-    // MARK: - Icon State
+    // MARK: - Icon
 
-    func setIconNormal() {
-        if let icon = normalIcon {
-            let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
-            let configuredIcon = icon.withSymbolConfiguration(config) ?? icon
-            configuredIcon.isTemplate = true
-            statusItem.button?.image = configuredIcon
-            statusItem.button?.appearsDisabled = false
+    private enum IconState {
+        case idle, recording, transcribing, loading
+    }
+
+    private func setIcon(for state: DictationState) {
+        switch state {
+        case .idle: setIcon(for: IconState.idle)
+        case .recording: setIcon(for: IconState.recording)
+        case .transcribing: setIcon(for: IconState.transcribing)
         }
     }
 
-    func setIconActive() {
-        if let icon = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "TextTap Active") {
+    private func setIcon(for state: IconState) {
+        let symbolName = "circle.fill"
+        guard let icon = NSImage(systemSymbolName: symbolName, accessibilityDescription: "TextTap") else { return }
+
+        switch state {
+        case .recording:
             let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .bold)
                 .applying(.init(paletteColors: [.systemRed]))
-            let configuredIcon = icon.withSymbolConfiguration(config) ?? icon
-            configuredIcon.isTemplate = false
-            statusItem.button?.image = configuredIcon
+            let img = icon.withSymbolConfiguration(config) ?? icon
+            img.isTemplate = false
+            statusItem.button?.image = img
             statusItem.button?.appearsDisabled = false
-        }
-    }
 
-    func setIconTranscribing() {
-        if let icon = normalIcon {
+        case .idle:
             let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
-            let configuredIcon = icon.withSymbolConfiguration(config) ?? icon
-            configuredIcon.isTemplate = true
-            statusItem.button?.image = configuredIcon
+            let img = icon.withSymbolConfiguration(config) ?? icon
+            img.isTemplate = true
+            statusItem.button?.image = img
+            statusItem.button?.appearsDisabled = false
+
+        case .transcribing, .loading:
+            let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
+            let img = icon.withSymbolConfiguration(config) ?? icon
+            img.isTemplate = true
+            statusItem.button?.image = img
             statusItem.button?.appearsDisabled = true
-        }
-    }
-
-    func setIconLoading() {
-        if let icon = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "TextTap Loading") {
-            let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
-            let configuredIcon = icon.withSymbolConfiguration(config) ?? icon
-            configuredIcon.isTemplate = true
-            statusItem.button?.image = configuredIcon
-            statusItem.button?.appearsDisabled = true  // Grays out the icon
         }
     }
 
@@ -170,9 +138,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func statusItemClicked(_ sender: Any?) {
         guard let event = NSApp.currentEvent else { return }
-
         if event.type == .rightMouseUp {
-            statusBarMenu.show(from: statusItem, isActive: dictationManager.isActive, isLoading: isModelLoading)
+            statusBarMenu.show(from: statusItem, isActive: dictationManager.isActive, isLoading: !dictationManager.isModelLoaded)
         } else {
             toggleDictation()
         }
@@ -181,17 +148,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Dictation Toggle
 
     func toggleDictation() {
-        // Check if model is still loading
-        if isModelLoading {
-            return
-        }
+        guard dictationManager.isModelLoaded else { return }
 
-        // Check permissions first
         if !checkAccessibilityPermission() {
             showPermissionAlert(
                 title: "Accessibility Permission Required",
-                message: "TextTap needs Accessibility access for hotkey detection and cursor tracking. Please grant permission in System Settings.",
-                settingsAction: openAccessibilitySettings
+                message: "TextTap needs Accessibility access for hotkey detection and cursor tracking.",
+                settingsURL: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
             )
             return
         }
@@ -211,7 +174,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Global Hotkey
 
     private func setupGlobalHotkey() {
-        // Don't create a second tap if one already exists
         if eventTap != nil { return }
 
         let eventMask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue) |
@@ -225,8 +187,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             eventsOfInterest: eventMask,
             callback: { proxy, type, event, refcon in
                 guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
-                let appDelegate = Unmanaged<AppDelegate>.fromOpaque(refcon).takeUnretainedValue()
-                return appDelegate.handleGlobalEvent(proxy: proxy, type: type, event: event)
+                let delegate = Unmanaged<AppDelegate>.fromOpaque(refcon).takeUnretainedValue()
+                return delegate.handleGlobalEvent(proxy: proxy, type: type, event: event)
             },
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
@@ -241,6 +203,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func removeGlobalHotkey() {
+        holdTimer?.cancel()
+        holdTimer = nil
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
         }
@@ -250,62 +214,87 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func handleGlobalEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         let flags = event.flags
-        let config = Config.shared.hotkey
 
-        // Handle Esc key while dictation is active - CANCEL (no paste)
-        if type == .keyDown && keyCode == 0x35 && dictationManager.isActive {
-            DispatchQueue.main.async {
-                self.dictationManager.stop()
-            }
+        // Esc cancels active dictation
+        if type == .keyDown && keyCode == 0x35 && dictationManager.dictationState != .idle {
+            DispatchQueue.main.async { self.dictationManager.cancel() }
             return nil
         }
 
+        let config = Config.shared.hotkey
+
         switch config.mode {
         case .doubleTap:
-            return handleDoubleTapMode(type: type, keyCode: keyCode, flags: flags, config: config, event: event)
+            return handleModifierKey(type: type, flags: flags, config: config, event: event)
         case .shortcut:
             return handleShortcutMode(type: type, keyCode: keyCode, flags: flags, config: config, event: event)
         }
     }
 
-    private func handleDoubleTapMode(type: CGEventType, keyCode: UInt16, flags: CGEventFlags,
-                                     config: HotkeyConfig, event: CGEvent) -> Unmanaged<CGEvent>? {
+    /// Handles modifier key for both double-tap toggle and hold-to-talk.
+    ///
+    /// On key down: start a hold timer. If held past threshold → push-to-talk starts.
+    /// On key up before threshold: treat as a tap → check for double-tap.
+    /// On key up after hold: stop recording and transcribe.
+    private func handleModifierKey(type: CGEventType, flags: CGEventFlags, config: HotkeyConfig, event: CGEvent) -> Unmanaged<CGEvent>? {
         let key = config.key
+        guard HotkeyConfig.isModifier(key) else {
+            return Unmanaged.passUnretained(event)
+        }
+        guard let targetFlag = HotkeyConfig.modifierFlag(for: key) else {
+            return Unmanaged.passUnretained(event)
+        }
+        guard type == .flagsChanged else {
+            return Unmanaged.passUnretained(event)
+        }
 
-        if HotkeyConfig.isModifier(key) {
-            // Handle modifier key double-tap (e.g., Command, Option, Control, Shift)
-            guard let targetFlag = HotkeyConfig.modifierFlag(for: key) else {
-                return Unmanaged.passUnretained(event)
-            }
-
-            if type == .flagsChanged {
-                let keyPressed: Bool
-                if let deviceMask = HotkeyConfig.deviceModifierMask(for: key) {
-                    // Side-specific modifier (e.g., leftcmd, rightcmd)
-                    keyPressed = (flags.rawValue & deviceMask) != 0
-                } else {
-                    // Generic modifier (e.g., cmd, shift)
-                    keyPressed = flags.contains(targetFlag)
-                }
-
-                // Detect key release (transition from pressed to not pressed)
-                if keyWasPressed && !keyPressed {
-                    handleDoubleTapRelease(config: config)
-                }
-                keyWasPressed = keyPressed
-            }
+        let keyPressed: Bool
+        if let deviceMask = HotkeyConfig.deviceModifierMask(for: key) {
+            keyPressed = (flags.rawValue & deviceMask) != 0
         } else {
-            // Handle regular key double-tap (e.g., F1, Escape, etc.)
-            guard let targetKeyCode = HotkeyConfig.keyCode(for: key) else {
-                return Unmanaged.passUnretained(event)
-            }
+            keyPressed = flags.contains(targetFlag)
+        }
 
-            if keyCode == targetKeyCode {
-                if type == .keyDown && !keyWasPressed {
-                    keyWasPressed = true
-                } else if type == .keyUp && keyWasPressed {
-                    keyWasPressed = false
-                    handleDoubleTapRelease(config: config)
+        if keyPressed && !keyIsDown {
+            // Key just pressed
+            keyIsDown = true
+            keyDownTime = Date()
+
+            // Start hold timer — if it fires, we enter push-to-talk
+            holdTimer?.cancel()
+            let timer = DispatchSource.makeTimerSource(queue: .main)
+            timer.schedule(deadline: .now() + holdThreshold)
+            timer.setEventHandler { [weak self] in
+                guard let self = self, self.keyIsDown else { return }
+                self.isHoldActive = true
+                self.lastTapTime = nil // Clear any pending tap
+                if self.dictationManager.dictationState == .idle {
+                    self.toggleDictation()
+                }
+            }
+            timer.resume()
+            holdTimer = timer
+
+        } else if !keyPressed && keyIsDown {
+            // Key just released
+            keyIsDown = false
+            holdTimer?.cancel()
+            holdTimer = nil
+
+            if isHoldActive {
+                // Was holding → stop and transcribe
+                isHoldActive = false
+                if dictationManager.isActive {
+                    DispatchQueue.main.async { self.dictationManager.stopAndPaste() }
+                }
+            } else {
+                // Quick tap → check for double-tap
+                let now = Date()
+                if let lastTap = lastTapTime, now.timeIntervalSince(lastTap) < config.doubleTapInterval {
+                    lastTapTime = nil
+                    DispatchQueue.main.async { self.toggleDictation() }
+                } else {
+                    lastTapTime = now
                 }
             }
         }
@@ -313,46 +302,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return Unmanaged.passUnretained(event)
     }
 
-    private func handleDoubleTapRelease(config: HotkeyConfig) {
-        let now = Date()
-        if let lastUp = lastKeyUpTime {
-            let interval = now.timeIntervalSince(lastUp)
-            if interval < config.doubleTapInterval {
-                // Double-tap detected - toggle or paste
-                DispatchQueue.main.async {
-                    if self.dictationManager.isActive {
-                        self.dictationManager.stopAndPaste()
-                    } else {
-                        self.toggleDictation()
-                    }
-                }
-                lastKeyUpTime = nil
-            } else {
-                lastKeyUpTime = now
-            }
-        } else {
-            lastKeyUpTime = now
-        }
-    }
-
     private func handleShortcutMode(type: CGEventType, keyCode: UInt16, flags: CGEventFlags,
                                     config: HotkeyConfig, event: CGEvent) -> Unmanaged<CGEvent>? {
-        guard type == .keyDown else {
-            return Unmanaged.passUnretained(event)
-        }
-
-        // Parse the shortcut string (e.g., "cmd-shift-d")
+        guard type == .keyDown else { return Unmanaged.passUnretained(event) }
         guard let parsed = config.parsedShortcut,
               let targetKeyCode = HotkeyConfig.keyCode(for: parsed.key) else {
             return Unmanaged.passUnretained(event)
         }
+        guard keyCode == targetKeyCode else { return Unmanaged.passUnretained(event) }
 
-        // Check if key matches
-        guard keyCode == targetKeyCode else {
-            return Unmanaged.passUnretained(event)
-        }
-
-        // Check if all required modifiers are pressed
         var requiredFlags: CGEventFlags = []
         for modifier in parsed.modifiers {
             if let flag = HotkeyConfig.modifierFlag(for: modifier) {
@@ -360,36 +318,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
 
-        // Verify all required modifiers are held
-        let hasAllModifiers = requiredFlags.isEmpty || flags.contains(requiredFlags)
-
-        if hasAllModifiers {
-            DispatchQueue.main.async {
-                if self.dictationManager.isActive {
-                    self.dictationManager.stopAndPaste()
-                } else {
-                    self.toggleDictation()
-                }
-            }
+        if requiredFlags.isEmpty || flags.contains(requiredFlags) {
+            DispatchQueue.main.async { self.toggleDictation() }
             return nil
         }
 
         return Unmanaged.passUnretained(event)
     }
 
-    // MARK: - Permission Checks
+    // MARK: - Permissions
 
     func checkAccessibilityPermission() -> Bool {
-        return AXIsProcessTrusted()
+        AXIsProcessTrusted()
     }
 
     func checkMicrophonePermission() -> Bool {
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .authorized:
-            return true
-        default:
-            return false
-        }
+        AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
     }
 
     func requestMicrophonePermission() {
@@ -400,36 +344,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 } else {
                     self?.showPermissionAlert(
                         title: "Microphone Permission Required",
-                        message: "TextTap needs microphone access to record speech for transcription. Please grant permission in System Settings.",
-                        settingsAction: self?.openMicrophoneSettings ?? {}
+                        message: "TextTap needs microphone access to record speech.",
+                        settingsURL: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
                     )
                 }
             }
         }
     }
 
-    func showPermissionAlert(title: String, message: String, settingsAction: @escaping () -> Void) {
+    func showPermissionAlert(title: String, message: String, settingsURL: String) {
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Open System Settings")
         alert.addButton(withTitle: "Cancel")
-
         if alert.runModal() == .alertFirstButtonReturn {
-            settingsAction()
-        }
-    }
-
-    func openAccessibilitySettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-            NSWorkspace.shared.open(url)
-        }
-    }
-
-    func openMicrophoneSettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
-            NSWorkspace.shared.open(url)
+            if let url = URL(string: settingsURL) {
+                NSWorkspace.shared.open(url)
+            }
         }
     }
 }

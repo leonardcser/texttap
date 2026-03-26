@@ -35,7 +35,8 @@ make run     # Build and run
 
 1. Launch TextTap
 2. Grant accessibility and microphone permissions when prompted
-3. Double-tap the Command key to start dictation (or use your configured shortcut)
+3. Double-tap the Command key to start dictation (or use your configured
+   shortcut)
 4. Speak - text is transcribed after detecting silence
 5. Double-tap Command again to stop and insert final text
 6. Press Escape to cancel without inserting
@@ -46,7 +47,8 @@ Select text before dictating to replace it with your spoken words.
 
 ## Configuration
 
-Create `~/.config/texttap/config.toml` to customize settings (see `config.example.toml`):
+Create `~/.config/texttap/config.toml` to customize settings (see
+`config.example.toml`):
 
 ```toml
 [hotkey]
@@ -61,7 +63,7 @@ silence_threshold = 0.01      # RMS threshold for silence (0.0-1.0)
 silence_duration = 1.0        # Seconds of silence before transcribing
 
 [transcription]
-model = "small.en"            # Whisper model: tiny, base, small, medium, large-v3
+model = "medium.en"            # Whisper model: tiny, base, small, medium, large-v3
 language = "en"               # Language code
 
 [indicator]
