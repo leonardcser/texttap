@@ -5,7 +5,7 @@
 <h1 align="center">TextTap</h1>
 
 <p align="center">
-  <em>Local voice-to-text dictation for macOS using Whisper.<br>Double-tap Command to start dictating, double-tap again to insert the transcribed text.</em>
+  <em>Local voice-to-text dictation for macOS using Whisper.<br>Double-tap Command to dictate, or hold it for push-to-talk.</em>
 </p>
 
 <p align="center">
@@ -35,11 +35,11 @@ make run     # Build and run
 
 1. Launch TextTap
 2. Grant accessibility and microphone permissions when prompted
-3. Double-tap the Command key to start dictation (or use your configured
-   shortcut)
-4. Speak - text is transcribed after detecting silence
-5. Double-tap Command again to stop and insert final text
-6. Press Escape to cancel without inserting
+3. Start dictating:
+   - **Double-tap** the Command key to toggle dictation on/off
+   - **Hold** the Command key for push-to-talk — release to stop and transcribe
+4. Transcribed text is inserted at the cursor position
+5. Press Escape to cancel without inserting
 
 ### Selection Replacement
 
@@ -79,7 +79,6 @@ fg_color = "white"
 
 ## How It Works
 
-1. Records audio to a temporary WAV file
-2. Detects silence to automatically trigger transcription
-3. Uses WhisperKit for local on-device transcription
-4. Inserts text at cursor position via accessibility API or keyboard events
+1. Continuously records audio while dictation is active
+2. Uses WhisperKit for local on-device transcription
+3. Inserts text at cursor position via accessibility API or keyboard events
