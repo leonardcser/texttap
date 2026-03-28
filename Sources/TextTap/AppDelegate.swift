@@ -15,6 +15,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private var holdTimer: DispatchSourceTimer?
     private var isHoldActive = false
     private var keyIsDown = false
+    private var usedAsCombo = false
 
     private let holdThreshold: TimeInterval = 0.3
 
@@ -202,9 +203,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         CGEvent.tapEnable(tap: tap, enable: true)
     }
 
-    private func removeGlobalHotkey() {
+    private func cancelHoldTimer() {
         holdTimer?.cancel()
         holdTimer = nil
+    }
+
+    private func removeGlobalHotkey() {
+        cancelHoldTimer()
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
         }
@@ -244,6 +249,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard let targetFlag = HotkeyConfig.modifierFlag(for: key) else {
             return Unmanaged.passUnretained(event)
         }
+        // A non-modifier key pressed while our modifier is held → keyboard shortcut, not dictation
+        if type == .keyDown && keyIsDown {
+            usedAsCombo = true
+            cancelHoldTimer()
+            return Unmanaged.passUnretained(event)
+        }
+
         guard type == .flagsChanged else {
             return Unmanaged.passUnretained(event)
         }
@@ -256,39 +268,52 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if keyPressed && !keyIsDown {
-            // Key just pressed
+            let otherModifiers = flags.subtracting(targetFlag)
+                .intersection([.maskCommand, .maskAlternate, .maskShift, .maskControl])
             keyIsDown = true
+            usedAsCombo = !otherModifiers.isEmpty
             keyDownTime = Date()
 
-            // Start hold timer — if it fires, we enter push-to-talk
-            holdTimer?.cancel()
-            let timer = DispatchSource.makeTimerSource(queue: .main)
-            timer.schedule(deadline: .now() + holdThreshold)
-            timer.setEventHandler { [weak self] in
-                guard let self = self, self.keyIsDown else { return }
-                self.isHoldActive = true
-                self.lastTapTime = nil // Clear any pending tap
-                if self.dictationManager.dictationState == .idle {
-                    self.toggleDictation()
+            if !usedAsCombo {
+                // If held past threshold → push-to-talk starts
+                cancelHoldTimer()
+                let timer = DispatchSource.makeTimerSource(queue: .main)
+                timer.schedule(deadline: .now() + holdThreshold)
+                timer.setEventHandler { [weak self] in
+                    guard let self = self, self.keyIsDown, !self.usedAsCombo else { return }
+                    self.isHoldActive = true
+                    self.lastTapTime = nil
+                    if self.dictationManager.dictationState == .idle {
+                        self.toggleDictation()
+                    }
                 }
+                timer.resume()
+                holdTimer = timer
             }
-            timer.resume()
-            holdTimer = timer
+
+        } else if keyPressed && keyIsDown && !usedAsCombo {
+            // Another modifier added while our key is held → combo
+            let otherModifiers = flags.subtracting(targetFlag)
+                .intersection([.maskCommand, .maskAlternate, .maskShift, .maskControl])
+            if !otherModifiers.isEmpty {
+                usedAsCombo = true
+                cancelHoldTimer()
+            }
 
         } else if !keyPressed && keyIsDown {
-            // Key just released
             keyIsDown = false
-            holdTimer?.cancel()
-            holdTimer = nil
+            cancelHoldTimer()
+
+            if usedAsCombo {
+                return Unmanaged.passUnretained(event)
+            }
 
             if isHoldActive {
-                // Was holding → stop and transcribe
                 isHoldActive = false
                 if dictationManager.isActive {
                     DispatchQueue.main.async { self.dictationManager.stopAndPaste() }
                 }
             } else {
-                // Quick tap → check for double-tap
                 let now = Date()
                 if let lastTap = lastTapTime, now.timeIntervalSince(lastTap) < config.doubleTapInterval {
                     lastTapTime = nil

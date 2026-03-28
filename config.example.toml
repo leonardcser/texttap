@@ -49,7 +49,7 @@ silence_threshold = 0.01      # RMS threshold for silence (0.0-1.0)
 silence_duration = 1.0        # Seconds of silence before transcribing
 
 [transcription]
-model = "medium.en"            # Whisper model: tiny, base, small, medium, large-v3
+model = "small.en"            # Whisper model: tiny, base, small, medium, large-v3
 language = "en"               # Language code
 
 [indicator]

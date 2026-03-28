@@ -176,7 +176,7 @@ struct HotkeyConfig {
 }
 
 struct TranscriptionConfig {
-    var model: String = "medium.en"
+    var model: String = "small.en"
     var language: String = "en"
 }
 
