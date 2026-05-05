@@ -208,6 +208,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         holdTimer = nil
     }
 
+    private func resetHotkeyState() {
+        cancelHoldTimer()
+        keyIsDown = false
+        usedAsCombo = false
+        isHoldActive = false
+        keyDownTime = nil
+        lastTapTime = nil
+    }
+
     private func removeGlobalHotkey() {
         cancelHoldTimer()
         if let tap = eventTap {
@@ -217,6 +226,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func handleGlobalEvent(proxy: CGEventTapProxy, type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        // macOS disables the tap if it times out or under user input; re-enable and reset state.
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            print("[TextTap] Event tap disabled (\(type.rawValue)); re-enabling")
+            if let tap = eventTap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+            resetHotkeyState()
+            return Unmanaged.passUnretained(event)
+        }
+
         let keyCode = UInt16(event.getIntegerValueField(.keyboardEventKeycode))
         let flags = event.flags
 
@@ -268,6 +287,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         if keyPressed && !keyIsDown {
+            // Ignore presses while transcribing so a stray tap doesn't poison lastTapTime
+            // and the hold timer doesn't fire into a no-op.
+            if dictationManager.dictationState == .transcribing {
+                return Unmanaged.passUnretained(event)
+            }
+
             let otherModifiers = flags.subtracting(targetFlag)
                 .intersection([.maskCommand, .maskAlternate, .maskShift, .maskControl])
             keyIsDown = true
@@ -304,12 +329,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             keyIsDown = false
             cancelHoldTimer()
 
-            if usedAsCombo {
+            let wasCombo = usedAsCombo
+            let wasHold = isHoldActive
+            usedAsCombo = false
+            isHoldActive = false
+
+            if wasCombo {
+                // If the hold timer fired before the combo, recording is active; cancel it.
+                if wasHold && dictationManager.isActive {
+                    DispatchQueue.main.async { self.dictationManager.cancel() }
+                }
                 return Unmanaged.passUnretained(event)
             }
 
-            if isHoldActive {
-                isHoldActive = false
+            if wasHold {
                 if dictationManager.isActive {
                     DispatchQueue.main.async { self.dictationManager.stopAndPaste() }
                 }

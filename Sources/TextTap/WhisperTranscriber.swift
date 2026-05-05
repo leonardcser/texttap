@@ -48,8 +48,10 @@ actor WhisperTranscriber {
             throw TranscriptionError.modelNotLoaded
         }
 
+        // Without VAD, Whisper's seek-loop can jump forward on long audio and skip most segments.
         let options = DecodingOptions(
-            language: Config.shared.transcription.language
+            language: Config.shared.transcription.language,
+            chunkingStrategy: .vad
         )
 
         print("[TextTap] Starting WhisperKit transcription for \(audioURL.lastPathComponent)")
