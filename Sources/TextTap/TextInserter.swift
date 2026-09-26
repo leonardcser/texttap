@@ -12,7 +12,7 @@ final class TextInserter: @unchecked Sendable {
     ]
 
     func insertIncremental(_ text: String) {
-        print("[TextTap] insertIncremental called with '\(text)' (length: \(text.count))")
+        print("[TextTap] Inserting transcription (\(text.count) characters)")
         guard !text.isEmpty else {
             print("[TextTap] Text is empty, nothing to insert")
             return

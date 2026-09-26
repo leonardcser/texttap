@@ -11,20 +11,20 @@ class DictationManager {
     private let cursorTracker = CursorTracker()
     private let cursorIndicator = CursorIndicator()
     private let textInserter = TextInserter()
-    private let transcriber = WhisperTranscriber()
+    private let whisperTranscriber = WhisperTranscriber()
+    private let transcriber = Transcriber()
 
     // Whisper noise artifacts to filter out
     private let noisePatterns: Set<String> = ["[", "]", "(", ")", ".", ",", "!", "?", "-", "—", "..."]
 
     private var currentAudioURL: URL?
     private var transcriptionTask: Task<Void, Never>?
+    private var transcriptionID: UUID?
     private var modelLoadTask: Task<Void, Never>?
     private(set) var dictationState: DictationState = .idle
 
     var isActive: Bool { dictationState == .recording }
-    var isModelLoaded = false
     var onStateChange: ((DictationState) -> Void)?
-    var onModelStateChange: ((Bool) -> Void)?
 
     init() {
         setupCallbacks()
@@ -43,19 +43,10 @@ class DictationManager {
 
     private func preloadModel() {
         modelLoadTask = Task {
-            await MainActor.run { onModelStateChange?(false) }
             do {
-                try await transcriber.loadModel()
-                await MainActor.run {
-                    isModelLoaded = true
-                    onModelStateChange?(true)
-                }
+                try await whisperTranscriber.loadModel()
             } catch {
-                print("[TextTap] Failed to load model: \(error)")
-                await MainActor.run {
-                    isModelLoaded = false
-                    onModelStateChange?(true)
-                }
+                print("[TextTap] Local Whisper preload failed; will retry when needed")
             }
         }
     }
@@ -103,8 +94,10 @@ class DictationManager {
                 print("[TextTap] Audio file ready: \(url.lastPathComponent), size: \(fileSize) bytes")
             }
 
+            let id = UUID()
+            transcriptionID = id
             transcriptionTask = Task {
-                await transcribe(url: url)
+                await transcribe(url: url, id: id)
             }
 
         case .transcribing:
@@ -121,7 +114,9 @@ class DictationManager {
         case .idle:
             return
         case .recording:
-            _ = audioRecorder.stopRecording()
+            if let url = audioRecorder.stopRecording() {
+                try? FileManager.default.removeItem(at: url)
+            }
             audioRecorder.cleanup()
         case .transcribing:
             transcriptionTask?.cancel()
@@ -132,45 +127,37 @@ class DictationManager {
 
     // MARK: - Transcription
 
-    private func transcribe(url: URL) async {
+    @MainActor
+    private func transcribe(url: URL, id: UUID) async {
         defer {
             try? FileManager.default.removeItem(at: url)
         }
 
-        if let task = modelLoadTask {
-            print("[TextTap] Waiting for model to load...")
-            await task.value
-        }
-
-        guard !Task.isCancelled else { return }
-
-        guard await transcriber.isReady else {
-            print("[TextTap] Transcriber not ready")
-            await MainActor.run { finishAndCleanup() }
-            return
-        }
-
         do {
-            let text = try await transcriber.transcribe(audioURL: url)
-            print("[TextTap] Transcription result: '\(text)' (length: \(text.count))")
-
-            guard !Task.isCancelled else { return }
-
-            if !isNoiseTranscription(text) {
-                await MainActor.run {
-                    textInserter.insertIncremental(text)
+            let text = try await transcriber.transcribe(audioURL: url, config: Config.shared.transcription) {
+                if let task = self.modelLoadTask {
+                    await task.value
                 }
-            } else {
-                print("[TextTap] Filtered as noise: '\(text)'")
+                try Task.checkCancellation()
+                try await self.whisperTranscriber.loadModel()
+                try Task.checkCancellation()
+                return try await self.whisperTranscriber.transcribe(audioURL: url)
             }
-        } catch {
-            print("[TextTap] Transcription error: \(error)")
-        }
 
-        await MainActor.run { finishAndCleanup() }
+            guard transcriptionID == id, !Task.isCancelled else { return }
+            if !isNoiseTranscription(text) {
+                textInserter.insertIncremental(text)
+            }
+            finishAndCleanup()
+        } catch {
+            guard transcriptionID == id, !Task.isCancelled else { return }
+            print("[TextTap] Transcription failed")
+            finishAndCleanup()
+        }
     }
 
     private func finishAndCleanup() {
+        transcriptionID = nil
         dictationState = .idle
         onStateChange?(.idle)
 
@@ -188,9 +175,12 @@ class DictationManager {
     }
 
     func cleanup() {
+        transcriptionID = nil
         transcriptionTask?.cancel()
         transcriptionTask = nil
-        _ = audioRecorder.stopRecording()
+        if let url = audioRecorder.stopRecording() {
+            try? FileManager.default.removeItem(at: url)
+        }
         cursorTracker.stopTracking()
         cursorIndicator.hide()
         audioRecorder.cleanup()

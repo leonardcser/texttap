@@ -22,7 +22,7 @@ class AudioRecorder {
 
         // Create temp file for recording
         let tempDir = FileManager.default.temporaryDirectory
-        let fileName = "texttap_\(Int(Date().timeIntervalSince1970)).wav"
+        let fileName = "texttap_\(UUID().uuidString).wav"
         let fileURL = tempDir.appendingPathComponent(fileName)
         tempFileURL = fileURL
         print("[TextTap] Recording to: \(fileURL.path)")

@@ -14,7 +14,7 @@ class StatusBarMenu: NSObject {
 
     // MARK: - Menu Construction
 
-    private func buildMenu(isActive: Bool, isLoading: Bool) {
+    private func buildMenu(isActive: Bool) {
         menu.removeAllItems()
 
         // Version info
@@ -25,23 +25,14 @@ class StatusBarMenu: NSObject {
             menu.addItem(NSMenuItem.separator())
         }
 
-        if isLoading {
-            // Show loading status
-            let loadingItem = NSMenuItem(title: "Loading model...", action: nil, keyEquivalent: "")
-            loadingItem.isEnabled = false
-            menu.addItem(loadingItem)
-        } else {
-            // Toggle dictation
-            let toggleTitle = isActive ? "Stop Dictation" : "Start Dictation"
-            let toggleItem = NSMenuItem(title: toggleTitle, action: #selector(toggleClicked), keyEquivalent: "")
-            toggleItem.target = self
-            menu.addItem(toggleItem)
+        let toggleTitle = isActive ? "Stop Dictation" : "Start Dictation"
+        let toggleItem = NSMenuItem(title: toggleTitle, action: #selector(toggleClicked), keyEquivalent: "")
+        toggleItem.target = self
+        menu.addItem(toggleItem)
 
-            // Hotkey hint
-            let hotkeyItem = NSMenuItem(title: "Double-tap \u{2318} to toggle", action: nil, keyEquivalent: "")
-            hotkeyItem.isEnabled = false
-            menu.addItem(hotkeyItem)
-        }
+        let hotkeyItem = NSMenuItem(title: "Double-tap \u{2318} to toggle", action: nil, keyEquivalent: "")
+        hotkeyItem.isEnabled = false
+        menu.addItem(hotkeyItem)
 
         menu.addItem(NSMenuItem.separator())
 
@@ -60,8 +51,8 @@ class StatusBarMenu: NSObject {
 
     // MARK: - Menu Display
 
-    func show(from statusItem: NSStatusItem, isActive: Bool, isLoading: Bool = false) {
-        buildMenu(isActive: isActive, isLoading: isLoading)
+    func show(from statusItem: NSStatusItem, isActive: Bool) {
+        buildMenu(isActive: isActive)
         statusItem.menu = menu
         statusItem.button?.performClick(nil)
         statusItem.menu = nil

@@ -178,6 +178,11 @@ struct HotkeyConfig {
 struct TranscriptionConfig {
     var model: String = "small.en"
     var language: String = "en"
+    var remoteEnabled = false
+    var remoteURL = ""
+    var remoteModel = ""
+    var remoteTimeout: TimeInterval = 5
+    var apiKeyEnvironment = ""
 }
 
 struct IndicatorConfig {
@@ -219,6 +224,10 @@ struct Config {
             return
         }
 
+        load(contents: contents)
+    }
+
+    mutating func load(contents: String) {
         let parsed = parseTOML(contents)
 
         // Hotkey section
@@ -245,6 +254,23 @@ struct Config {
             }
             if let val = transcriptionSection["language"] as? String {
                 transcription.language = val
+            }
+            if let val = transcriptionSection["remote_enabled"] as? Bool {
+                transcription.remoteEnabled = val
+            }
+            if let val = transcriptionSection["remote_url"] as? String {
+                transcription.remoteURL = val
+            }
+            if let val = transcriptionSection["remote_model"] as? String {
+                transcription.remoteModel = val
+            }
+            let timeout = (transcriptionSection["remote_timeout"] as? Double)
+                ?? (transcriptionSection["remote_timeout"] as? Int).map(Double.init)
+            if let timeout, timeout.isFinite, timeout > 0 {
+                transcription.remoteTimeout = timeout
+            }
+            if let val = transcriptionSection["api_key_env"] as? String {
+                transcription.apiKeyEnvironment = val
             }
         }
 
@@ -285,7 +311,22 @@ struct Config {
         let lines = content.components(separatedBy: .newlines)
 
         for line in lines {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            // Strip comments only outside quoted values (colors may contain '#').
+            var quoted = false
+            var escaped = false
+            let content = line.prefix { character in
+                if escaped {
+                    escaped = false
+                } else if quoted && character == "\\" {
+                    escaped = true
+                } else if character == "\"" {
+                    quoted.toggle()
+                } else if character == "#" && !quoted {
+                    return false
+                }
+                return true
+            }
+            let trimmed = content.trimmingCharacters(in: .whitespaces)
 
             // Skip comments and empty lines
             if trimmed.isEmpty || trimmed.hasPrefix("#") {

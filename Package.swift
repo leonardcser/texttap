@@ -17,6 +17,10 @@ let package = Package(
             name: "TextTap",
             dependencies: ["WhisperKit"],
             path: "Sources/TextTap"
-        )
+        ),
+        .testTarget(
+            name: "TextTapTests",
+            dependencies: [ "TextTap" ]
+        ),
     ]
 )

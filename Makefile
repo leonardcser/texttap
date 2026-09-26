@@ -7,6 +7,10 @@ APP_NAME = TextTap
 APP_BUNDLE = $(APP_NAME).app
 BUILD_DIR = .build/release
 
+# Machine-specific signing configuration stays outside the repository.
+-include $(HOME)/.config/texttap/build.mk
+SIGNING_IDENTITY ?= -
+
 .PHONY: build install clean help resolve icons
 
 icons:
@@ -51,7 +55,8 @@ build: resolve icons
 	@if [ -f assets/Assets.car ]; then cp assets/Assets.car $(APP_BUNDLE)/Contents/Resources/; fi
 	@/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $(VERSION)" $(APP_BUNDLE)/Contents/Info.plist
 	@/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $(VERSION)" $(APP_BUNDLE)/Contents/Info.plist
-	@codesign --force --deep --sign - $(APP_BUNDLE)
+	@codesign --force --deep --sign "$(SIGNING_IDENTITY)" $(APP_BUNDLE)
+	@codesign --verify --deep --strict $(APP_BUNDLE)
 	@echo "Built $(APP_BUNDLE) v$(VERSION)"
 
 install: build

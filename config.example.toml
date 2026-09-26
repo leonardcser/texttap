@@ -44,13 +44,25 @@ double_tap_interval = 0.3
 #   mode = "shortcut"
 #   shortcut = "alt-f1"
 
-[audio]
-silence_threshold = 0.01      # RMS threshold for silence (0.0-1.0)
-silence_duration = 1.0        # Seconds of silence before transcribing
-
 [transcription]
-model = "small.en"            # Whisper model: tiny, base, small, medium, large-v3
-language = "en"               # Language code
+# Local transcription is the default. To opt into remote-first transcription,
+# set true and configure your own OpenAI-compatible audio transcription API.
+# Failed remote requests retry the same recording locally.
+remote_enabled = false
+# Full HTTPS URL, for example https://stt.example.com/v1/audio/transcriptions
+remote_url = ""
+# Model identifier accepted by your server.
+remote_model = ""
+# Total remote request budget in seconds, including upload and inference.
+remote_timeout = 5
+# Your credential environment variable name, also used as the Keychain account.
+# For example: YOUR_STT_API_KEY. Never put the secret itself here.
+# Leave empty only for an endpoint that does not require authentication.
+api_key_env = ""
+# Local Whisper fallback model, preloaded in the background.
+model = "small.en"
+# Shared language hint. Use "" for automatic language detection.
+language = "en"
 
 [indicator]
 enabled = true                # Show waveform indicator near cursor

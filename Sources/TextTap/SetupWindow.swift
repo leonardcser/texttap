@@ -4,7 +4,6 @@ import AVFoundation
 enum SetupState {
     case requestingAccessibility
     case requestingMicrophone
-    case downloadingModel
 }
 
 class SetupWindow {
@@ -16,31 +15,10 @@ class SetupWindow {
     var onSetupComplete: (() -> Void)?
     var onAccessibilityGranted: (() -> Void)?
 
-    private static let baseDirectory: URL = {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        return home.appendingPathComponent(".texttap")
-    }()
-
     static var needsSetup: Bool {
         let hasAccessibility = AXIsProcessTrusted()
         let hasMicrophone = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
-        let hasModel = modelExists()
-        return !hasAccessibility || !hasMicrophone || !hasModel
-    }
-
-    private static func modelExists() -> Bool {
-        let fm = FileManager.default
-
-        // WhisperKit stores models in: ~/.texttap/models/argmaxinc/whisperkit-coreml/openai_whisper-*/
-        let whisperKitPath = baseDirectory
-            .appendingPathComponent("models/argmaxinc/whisperkit-coreml")
-
-        guard fm.fileExists(atPath: whisperKitPath.path),
-              let contents = try? fm.contentsOfDirectory(atPath: whisperKitPath.path) else {
-            return false
-        }
-
-        return contents.contains { $0.hasPrefix("openai_whisper-") }
+        return !hasAccessibility || !hasMicrophone
     }
 
     func show() {
@@ -160,11 +138,6 @@ class SetupWindow {
 
             guard self.window != nil else { return }
 
-            // Step 3: Model download (handled by DictationManager)
-            if !Self.modelExists() {
-                self.setState(.downloadingModel)
-            }
-
             self.onSetupComplete?()
         }
     }
@@ -175,8 +148,6 @@ class SetupWindow {
             statusLabel?.stringValue = "Requesting accessibility access…"
         case .requestingMicrophone:
             statusLabel?.stringValue = "Requesting microphone access…"
-        case .downloadingModel:
-            statusLabel?.stringValue = "Downloading speech model…"
         }
     }
 

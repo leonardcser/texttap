@@ -36,7 +36,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.setupGlobalHotkey()
             }
             setupWindow?.onSetupComplete = { [weak self] in
-                if self?.dictationManager?.isModelLoaded == true {
+                if AXIsProcessTrusted(), AVCaptureDevice.authorizationStatus(for: .audio) == .authorized {
                     self?.setupWindow?.hide()
                     self?.setupWindow = nil
                 }
@@ -61,7 +61,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.button?.target = self
         statusItem.button?.action = #selector(statusItemClicked(_:))
         statusItem.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
-        setIcon(for: .loading)
+        setIcon(for: IconState.idle)
     }
 
     private func setupMenu() {
@@ -78,24 +78,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         dictationManager.onStateChange = { [weak self] state in
             DispatchQueue.main.async { self?.setIcon(for: state) }
         }
-        dictationManager.onModelStateChange = { [weak self] isLoaded in
-            DispatchQueue.main.async {
-                if isLoaded {
-                    let hasMicrophone = AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
-                    if hasMicrophone {
-                        self?.setupWindow?.hide()
-                        self?.setupWindow = nil
-                    }
-                }
-                self?.setIcon(for: isLoaded ? .idle : .loading)
-            }
-        }
     }
 
     // MARK: - Icon
 
     private enum IconState {
-        case idle, recording, transcribing, loading
+        case idle, recording, transcribing
     }
 
     private func setIcon(for state: DictationState) {
@@ -126,7 +114,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             statusItem.button?.image = img
             statusItem.button?.appearsDisabled = false
 
-        case .transcribing, .loading:
+        case .transcribing:
             let config = NSImage.SymbolConfiguration(pointSize: 12, weight: .regular)
             let img = icon.withSymbolConfiguration(config) ?? icon
             img.isTemplate = true
@@ -140,7 +128,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     @objc func statusItemClicked(_ sender: Any?) {
         guard let event = NSApp.currentEvent else { return }
         if event.type == .rightMouseUp {
-            statusBarMenu.show(from: statusItem, isActive: dictationManager.isActive, isLoading: !dictationManager.isModelLoaded)
+            statusBarMenu.show(from: statusItem, isActive: dictationManager.isActive)
         } else {
             toggleDictation()
         }
@@ -149,8 +137,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Dictation Toggle
 
     func toggleDictation() {
-        guard dictationManager.isModelLoaded else { return }
-
         if !checkAccessibilityPermission() {
             showPermissionAlert(
                 title: "Accessibility Permission Required",

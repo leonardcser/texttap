@@ -5,80 +5,85 @@
 <h1 align="center">TextTap</h1>
 
 <p align="center">
-  <em>Local voice-to-text dictation for macOS using Whisper.<br>Double-tap Command to dictate, or hold it for push-to-talk.</em>
+  <em>Local voice-to-text dictation for macOS with optional remote transcription.<br>Double-tap Command to dictate, or hold it for push-to-talk.</em>
 </p>
 
 <p align="center">
   <img src="assets/demo.gif" alt="TextTap Demo">
 </p>
 
-## Requirements
+## Install
 
-- macOS 14+
-- Accessibility permissions (for text insertion)
-- Microphone permissions
-
-## Building
+Requires macOS 14+, microphone access, and Accessibility permission.
 
 ```bash
-swift build
-```
-
-Or use the Makefile:
-
-```bash
-make build   # Build the app
-make run     # Build and run
+make install   # Build and install to /Applications
 ```
 
 ## Usage
 
-1. Launch TextTap
-2. Grant accessibility and microphone permissions when prompted
-3. Start dictating:
-   - **Double-tap** the Command key to toggle dictation on/off
-   - **Hold** the Command key for push-to-talk — release to stop and transcribe
-4. Transcribed text is inserted at the cursor position
-5. Press Escape to cancel without inserting
+- **Double-tap Command** to start or stop dictation.
+- **Hold Command** for push-to-talk; release to transcribe.
+- **Escape** cancels without inserting text.
 
-### Selection Replacement
-
-Select text before dictating to replace it with your spoken words.
+Text appears at the cursor. Select existing text first to replace it.
+Whisper downloads its local model on first launch, then works offline.
 
 ## Configuration
 
-Create `~/.config/texttap/config.toml` to customize settings (see
-`config.example.toml`):
+Customize hotkeys, language, models, and appearance in
+`~/.config/texttap/config.toml`. See [config.example.toml](config.example.toml)
+for all settings. Right-click the menu bar icon to reload configuration;
+restart after changing the local model.
+
+### Optional remote transcription
+
+Transcription stays local by default. To use your own OpenAI-compatible STT
+server, add these settings to your private config, replacing the placeholders:
 
 ```toml
-[hotkey]
-# Activation mode: "double_tap" or "shortcut"
-mode = "double_tap"
-key = "cmd"                   # Key to double-tap (cmd, alt, ctrl, shift, fn, or a-z, 0-9, f1-f12, etc.)
-shortcut = "cmd-shift-d"      # For shortcut mode: dash-separated binding
-double_tap_interval = 0.3     # Max seconds between taps (double_tap mode only)
-
-[audio]
-silence_threshold = 0.01      # RMS threshold for silence (0.0-1.0)
-silence_duration = 1.0        # Seconds of silence before transcribing
-
 [transcription]
-model = "small.en"            # Whisper model: tiny, base, small, medium, large-v3
-language = "en"               # Language code
-
-[indicator]
-enabled = true                # Show waveform indicator near cursor
-width = 44
-height = 18
-offset_x = 8
-offset_y = 0
-bar_count = 9
-bg_color = "systemBlue"       # systemBlue, white, #FF0000, etc.
-fg_color = "white"
+remote_enabled = true
+remote_url = "https://stt.example.com/v1/audio/transcriptions"
+remote_model = "your-model"
+api_key_env = "YOUR_STT_API_KEY"
 ```
 
-## How It Works
+Recordings go to that server, with automatic local fallback on failure or after
+5 seconds (`remote_timeout`). Set `remote_enabled = false` to stay local.
 
-1. Continuously records audio while dictation is active
-2. Uses WhisperKit for local on-device transcription
-3. Inserts text at cursor position via accessibility API or keyboard events
+The API key comes from your chosen environment variable or Keychain. For Finder
+and login launches, save it from a shell where that variable is already set:
+
+```bash
+/Applications/TextTap.app/Contents/MacOS/TextTap --store-stt-key
+```
+
+Keep secrets out of TOML and command-line arguments. TextTap does not log keys
+or transcripts and removes temporary recordings after use.
+
+## Local signing
+
+To help preserve permissions across local updates, use the same code-signing
+certificate each time. Select an identity from
+`security find-identity -v -p codesigning` in `~/.config/texttap/build.mk`:
+
+```make
+SIGNING_IDENTITY = YOUR_CERTIFICATE_SHA1
+```
+
+Keep its private key in Keychain. Both build and install use this setting;
+without it, builds are ad-hoc signed. Switching identities may require one final
+permission approval. A local self-signed certificate is for your Mac, not public
+distribution.
+
+## Development
+
+```bash
+make build
+swift test
+```
+
+Live tests are opt-in: set `TEXTTAP_TEST_AUDIO` to a WAV containing "the quick
+brown fox" and `TEXTTAP_TEST_CONFIG` to your private config. These tests send the
+fixture to your configured server and also exercise local fallback.
