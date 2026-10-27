@@ -17,9 +17,9 @@ class DictationManager {
     // Whisper noise artifacts to filter out
     private let noisePatterns: Set<String> = ["[", "]", "(", ")", ".", ",", "!", "?", "-", "—", "..."]
 
-    private var currentAudioURL: URL?
-    private var transcriptionTask: Task<Void, Never>?
-    private var transcriptionID: UUID?
+    // Segments are transcribed as soon as they are recorded, in recording order.
+    private var segments: [Task<String, Error>] = []
+    private var dictationID: UUID?
     private var modelLoadTask: Task<Void, Never>?
     private(set) var dictationState: DictationState = .idle
 
@@ -33,6 +33,7 @@ class DictationManager {
 
     private func setupCallbacks() {
         audioRecorder.onAudioLevel = { [weak self] level in
+            guard self?.dictationState == .recording else { return }
             self?.cursorIndicator.updateLevel(level)
         }
 
@@ -56,13 +57,18 @@ class DictationManager {
     func start() {
         guard dictationState == .idle else { return }
 
+        let id = UUID()
+        dictationID = id
         dictationState = .recording
         cursorIndicator.reset()
         cursorIndicator.setState(.recording)
         onStateChange?(.recording)
 
         do {
-            currentAudioURL = try audioRecorder.startRecording()
+            try audioRecorder.start { [weak self] samples, isLast in
+                guard let self, self.dictationID == id else { return }
+                self.receive(samples, isLast: isLast)
+            }
             cursorTracker.startTracking()
             cursorIndicator.show()
         } catch {
@@ -77,96 +83,83 @@ class DictationManager {
             return
 
         case .recording:
-            let audioURL = audioRecorder.stopRecording()
-
             dictationState = .transcribing
             cursorIndicator.setState(.loading)
             onStateChange?(.transcribing)
-
-            guard let url = audioURL else {
-                print("[TextTap] No audio URL returned from stopRecording")
-                finishAndCleanup()
-                return
-            }
-
-            if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-               let fileSize = attrs[.size] as? Int64 {
-                print("[TextTap] Audio file ready: \(url.lastPathComponent), size: \(fileSize) bytes")
-            }
-
-            let id = UUID()
-            transcriptionID = id
-            transcriptionTask = Task {
-                await transcribe(url: url, id: id)
-            }
+            // The recorder delivers the last segment, which inserts the joined text.
+            audioRecorder.stop()
 
         case .transcribing:
             // Second stop while transcribing → cancel
-            transcriptionTask?.cancel()
-            transcriptionTask = nil
-            finishAndCleanup()
+            cancel()
         }
     }
 
     /// Cancel recording without transcribing (e.g. Esc key)
     func cancel() {
-        switch dictationState {
-        case .idle:
-            return
-        case .recording:
-            if let url = audioRecorder.stopRecording() {
-                try? FileManager.default.removeItem(at: url)
-            }
-            audioRecorder.cleanup()
-        case .transcribing:
-            transcriptionTask?.cancel()
-            transcriptionTask = nil
-        }
+        guard dictationState != .idle else { return }
+        audioRecorder.stop(deliver: false)
         finishAndCleanup()
     }
 
     // MARK: - Transcription
 
-    @MainActor
-    private func transcribe(url: URL, id: UUID) async {
-        defer {
-            try? FileManager.default.removeItem(at: url)
+    private func receive(_ samples: [Float], isLast: Bool) {
+        if !samples.isEmpty {
+            segments.append(Task { try await transcribe(samples) })
         }
-
-        do {
-            let text = try await transcriber.transcribe(audioURL: url, config: Config.shared.transcription) {
-                if let task = self.modelLoadTask {
-                    await task.value
+        guard isLast, let id = dictationID else { return }
+        let segments = segments
+        Task { @MainActor in
+            do {
+                var texts: [String] = []
+                for segment in segments {
+                    texts.append(try await segment.value)
                 }
-                try Task.checkCancellation()
-                try await self.whisperTranscriber.loadModel()
-                try Task.checkCancellation()
-                return try await self.whisperTranscriber.transcribe(audioURL: url)
+                guard dictationID == id else { return }
+                textInserter.insertIncremental(Self.join(texts.filter { !isNoiseTranscription($0) }))
+            } catch {
+                guard dictationID == id else { return }
+                print("[TextTap] Transcription failed")
             }
-
-            guard transcriptionID == id, !Task.isCancelled else { return }
-            if !isNoiseTranscription(text) {
-                textInserter.insertIncremental(text)
-            }
-            finishAndCleanup()
-        } catch {
-            guard transcriptionID == id, !Task.isCancelled else { return }
-            print("[TextTap] Transcription failed")
             finishAndCleanup()
         }
     }
 
+    private func transcribe(_ audio: [Float]) async throws -> String {
+        try await transcriber.transcribe(audio: audio, config: Config.shared.transcription) {
+            if let task = self.modelLoadTask {
+                await task.value
+            }
+            try Task.checkCancellation()
+            try await self.whisperTranscriber.loadModel()
+            try Task.checkCancellation()
+            return try await self.whisperTranscriber.transcribe(audio: audio)
+        }
+    }
+
     private func finishAndCleanup() {
-        transcriptionID = nil
+        dictationID = nil
+        segments.forEach { $0.cancel() }
+        segments = []
         dictationState = .idle
         onStateChange?(.idle)
 
         cursorTracker.stopTracking()
         cursorIndicator.hide()
+    }
 
-        audioRecorder.cleanup()
-        currentAudioURL = nil
-        transcriptionTask = nil
+    /// Joins segment transcripts. A segment cut mid-sentence often ends with a period while
+    /// the next one starts in lowercase, so that period is dropped.
+    static func join(_ texts: [String]) -> String {
+        texts.reduce("") { text, next in
+            guard !text.isEmpty else { return next }
+            var text = text
+            if next.first?.isLowercase == true, text.hasSuffix("."), !text.hasSuffix("..") {
+                text.removeLast()
+            }
+            return text + " " + next
+        }
     }
 
     private func isNoiseTranscription(_ text: String) -> Bool {
@@ -175,18 +168,9 @@ class DictationManager {
     }
 
     func cleanup() {
-        transcriptionID = nil
-        transcriptionTask?.cancel()
-        transcriptionTask = nil
-        if let url = audioRecorder.stopRecording() {
-            try? FileManager.default.removeItem(at: url)
-        }
-        cursorTracker.stopTracking()
-        cursorIndicator.hide()
-        audioRecorder.cleanup()
-        currentAudioURL = nil
+        audioRecorder.stop(deliver: false)
+        finishAndCleanup()
         cursorIndicator.cleanup()
         modelLoadTask?.cancel()
-        dictationState = .idle
     }
 }

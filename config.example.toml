@@ -53,7 +53,7 @@ remote_enabled = false
 remote_url = ""
 # Model identifier accepted by your server.
 remote_model = ""
-# Total remote request budget in seconds, including upload and inference.
+# Remote request budget in seconds per dictation part, including upload and inference.
 remote_timeout = 5
 # Your credential environment variable name, also used as the Keychain account.
 # For example: YOUR_STT_API_KEY. Never put the secret itself here.

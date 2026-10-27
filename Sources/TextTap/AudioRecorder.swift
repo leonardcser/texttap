@@ -1,164 +1,148 @@
 import AVFoundation
 import Foundation
 
-class AudioRecorder {
-    private static let sampleRate: Double = 16000  // Whisper expects 16kHz
+/// Records 16 kHz mono audio and delivers it in segments cut at pauses, so finished
+/// segments can be transcribed while recording continues.
+final class AudioRecorder {
+    static let sampleRate: Double = 16000  // Whisper expects 16kHz
+
     private var audioEngine: AVAudioEngine?
-    private var audioFile: AVAudioFile?
-    private var tempFileURL: URL?
-    private var recordingGeneration: Int = 0
+    private let lock = NSLock()
+    private var segmenter = Segmenter()
+    private var onSegment: (([Float], Bool) -> Void)?
 
     var onAudioLevel: ((Float) -> Void)?
-    var isRecording: Bool { audioEngine?.isRunning ?? false }
 
-    func startRecording() throws -> URL {
-        print("[TextTap] AudioRecorder.startRecording() called")
+    /// Starts recording. `onSegment` receives each segment on the main queue, in order;
+    /// the final call after `stop()` has `isLast` set and may carry an empty segment.
+    func start(onSegment: @escaping (_ samples: [Float], _ isLast: Bool) -> Void) throws {
         let audioEngine = AVAudioEngine()
-        self.audioEngine = audioEngine
-
         let inputNode = audioEngine.inputNode
         let inputFormat = inputNode.outputFormat(forBus: 0)
-        print("[TextTap] Input format: \(inputFormat.sampleRate)Hz, \(inputFormat.channelCount) channels")
-
-        // Create temp file for recording
-        let tempDir = FileManager.default.temporaryDirectory
-        let fileName = "texttap_\(UUID().uuidString).wav"
-        let fileURL = tempDir.appendingPathComponent(fileName)
-        tempFileURL = fileURL
-        print("[TextTap] Recording to: \(fileURL.path)")
-
-        // Create audio file with the desired format (16kHz mono for Whisper)
         let outputFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: Self.sampleRate,
             channels: 1,
             interleaved: false
         )!
+        guard let converter = AVAudioConverter(from: inputFormat, to: outputFormat) else {
+            throw RecordingError.unsupportedInput
+        }
 
-        let file = try AVAudioFile(
-            forWriting: fileURL,
-            settings: outputFormat.settings,
-            commonFormat: .pcmFormatFloat32,
-            interleaved: false
-        )
-        audioFile = file
+        lock.withLock {
+            segmenter = Segmenter()
+            self.onSegment = onSegment
+        }
 
-        // Create a converter if needed
-        let converter = AVAudioConverter(from: inputFormat, to: outputFormat)
-        var writeErrorCount = 0
-        let generation = recordingGeneration
-
-        // Install tap on input node
-        // Captures `file` directly so writes never race with stopRecording setting audioFile = nil.
-        // Captures `generation` to discard stale level callbacks after stop.
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, time in
-            guard let self = self else { return }
-
-            // Calculate RMS level
-            let level = self.calculateRMS(buffer: buffer)
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self, self.recordingGeneration == generation else { return }
-                self.onAudioLevel?(level)
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
+            guard let self else { return }
+            let frameCount = AVAudioFrameCount(
+                Double(buffer.frameLength) * outputFormat.sampleRate / inputFormat.sampleRate
+            )
+            guard let converted = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frameCount) else { return }
+            var supplied = false
+            var error: NSError?
+            converter.convert(to: converted, error: &error) { _, status in
+                if supplied {
+                    status.pointee = .noDataNow
+                    return nil
+                }
+                supplied = true
+                status.pointee = .haveData
+                return buffer
             }
+            guard error == nil, let channel = converted.floatChannelData?[0] else { return }
+            let samples = Array(UnsafeBufferPointer(start: channel, count: Int(converted.frameLength)))
 
-            // Convert and write to captured file reference (not self.audioFile)
-            if let converter = converter {
-                let frameCount = AVAudioFrameCount(
-                    Double(buffer.frameLength) * outputFormat.sampleRate / inputFormat.sampleRate
-                )
-                guard let convertedBuffer = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: frameCount) else {
-                    print("[TextTap] Failed to create converted buffer")
-                    return
-                }
+            let level = Self.rms(samples[...])
+            DispatchQueue.main.async { self.onAudioLevel?(level) }
 
-                var error: NSError?
-                let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
-                    outStatus.pointee = .haveData
-                    return buffer
-                }
-
-                converter.convert(to: convertedBuffer, error: &error, withInputFrom: inputBlock)
-
-                if let error = error {
-                    writeErrorCount += 1
-                    if writeErrorCount <= 5 {
-                        print("[TextTap] Audio conversion error: \(error)")
-                    }
-                } else {
-                    do {
-                        try file.write(from: convertedBuffer)
-                    } catch {
-                        writeErrorCount += 1
-                        if writeErrorCount <= 5 {
-                            print("[TextTap] Audio write error: \(error)")
-                        }
-                    }
-                }
-            } else {
-                // Format matches, write directly
-                do {
-                    try file.write(from: buffer)
-                } catch {
-                    writeErrorCount += 1
-                    if writeErrorCount <= 5 {
-                        print("[TextTap] Audio write error: \(error)")
-                    }
+            self.lock.withLock {
+                guard let onSegment = self.onSegment else { return }
+                for segment in self.segmenter.append(samples) {
+                    DispatchQueue.main.async { onSegment(segment, false) }
                 }
             }
         }
 
         try audioEngine.start()
-        print("[TextTap] Audio engine started")
-        return fileURL
+        self.audioEngine = audioEngine
     }
 
-    func stopRecording() -> URL? {
-        print("[TextTap] AudioRecorder.stopRecording() called")
-        recordingGeneration += 1  // Invalidate pending level callbacks from this session
-
+    /// Stops recording and delivers the remaining audio as the last segment.
+    /// With `deliver` false, the remaining audio is discarded and nothing is delivered.
+    func stop(deliver: Bool = true) {
         audioEngine?.inputNode.removeTap(onBus: 0)
         audioEngine?.stop()
         audioEngine = nil
 
-        audioFile = nil  // Release our reference (tap closure may still hold the file briefly)
-
-        let url = tempFileURL
-        tempFileURL = nil  // Clear so cleanup() won't double-delete
-
-        // Force file system sync to ensure all data is written to disk
-        if let url = url {
-            let fd = open(url.path, O_RDONLY)
-            if fd >= 0 {
-                fsync(fd)
-                close(fd)
-            }
-
-            // Log file info
-            if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-               let fileSize = attrs[.size] as? Int64 {
-                print("[TextTap] Recording stopped. File: \(url.lastPathComponent), size: \(fileSize) bytes")
-            }
-        }
-
-        return url
-    }
-
-    func cleanup() {
-        if let url = tempFileURL {
-            try? FileManager.default.removeItem(at: url)
-            tempFileURL = nil
+        lock.withLock {
+            // Clearing the callback also discards any tap buffer still in flight.
+            guard let onSegment else { return }
+            self.onSegment = nil
+            guard deliver else { return }
+            let rest = segmenter.finish()
+            DispatchQueue.main.async { onSegment(rest, true) }
         }
     }
 
-    private func calculateRMS(buffer: AVAudioPCMBuffer) -> Float {
-        guard let channelData = buffer.floatChannelData else { return 0 }
+    static func rms(_ samples: ArraySlice<Float>) -> Float {
+        guard !samples.isEmpty else { return 0 }
+        return sqrt(samples.reduce(0) { $0 + $1 * $1 } / Float(samples.count))
+    }
+}
 
-        let channelDataValue = channelData.pointee
-        let channelDataValueArray = stride(from: 0,
-                                           to: Int(buffer.frameLength),
-                                           by: buffer.stride).map { channelDataValue[$0] }
+enum RecordingError: Error {
+    case unsupportedInput
+}
 
-        let rms = sqrt(channelDataValueArray.map { $0 * $0 }.reduce(0, +) / Float(buffer.frameLength))
-        return rms
+/// Splits audio at pauses. A segment ends after 300 ms below a tenth of the loudest level
+/// so far once it is at least 3 seconds long, or at the quietest point of its last
+/// 3 seconds when it reaches 15 seconds without a pause.
+struct Segmenter {
+    static let frameLength = Int(AudioRecorder.sampleRate) / 10  // 100 ms
+    private let minFrames = 30
+    private let maxFrames = 150
+    private let pauseFrames = 3
+
+    private var samples: [Float] = []
+    private var levels: [Float] = []  // RMS of each complete frame in `samples`
+    private var loudest: Float = 0
+
+    mutating func append(_ input: [Float]) -> [[Float]] {
+        samples += input
+        var segments: [[Float]] = []
+        while (levels.count + 1) * Self.frameLength <= samples.count {
+            let start = levels.count * Self.frameLength
+            let level = AudioRecorder.rms(samples[start..<start + Self.frameLength])
+            levels.append(level)
+            loudest = max(loudest, level)
+
+            let threshold = max(loudest / 10, 0.002)
+            if levels.count >= minFrames, levels.suffix(pauseFrames).allSatisfy({ $0 < threshold }) {
+                segments.append(cut(atFrame: levels.count))
+            } else if levels.count >= maxFrames {
+                let recent = levels.indices.suffix(minFrames)
+                let quietest = recent.min { levels[$0] < levels[$1] }!
+                segments.append(cut(atFrame: quietest + 1))
+            }
+        }
+        return segments
+    }
+
+    mutating func finish() -> [Float] {
+        defer {
+            samples = []
+            levels = []
+        }
+        return samples
+    }
+
+    private mutating func cut(atFrame frame: Int) -> [Float] {
+        let end = frame * Self.frameLength
+        let segment = Array(samples[..<end])
+        samples.removeFirst(end)
+        levels.removeFirst(frame)
+        return segment
     }
 }

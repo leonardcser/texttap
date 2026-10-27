@@ -52,6 +52,9 @@ api_key_env = "YOUR_STT_API_KEY"
 Recordings go to that server, with automatic local fallback on failure or after
 5 seconds (`remote_timeout`). Set `remote_enabled = false` to stay local.
 
+Long dictations are split at pauses and each part is transcribed while you keep
+talking, so text appears shortly after you stop, however long you spoke.
+
 The API key comes from your chosen environment variable or Keychain. For Finder
 and login launches, save it from a shell where that variable is already set:
 
@@ -60,7 +63,7 @@ and login launches, save it from a shell where that variable is already set:
 ```
 
 Keep secrets out of TOML and command-line arguments. TextTap does not log keys
-or transcripts and removes temporary recordings after use.
+or transcripts, and recordings stay in memory, never on disk.
 
 ## Local signing
 

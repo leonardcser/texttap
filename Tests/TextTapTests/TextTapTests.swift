@@ -1,6 +1,7 @@
 @testable import TextTap
 import XCTest
 import Network
+import WhisperKit
 
 private func remoteTestConfig() -> TranscriptionConfig {
     TranscriptionConfig(
@@ -12,16 +13,10 @@ private func remoteTestConfig() -> TranscriptionConfig {
 }
 
 final class TextTapTests: XCTestCase {
-    private var audio: URL!
+    private let audio: [Float] = [0, 0.5, -1]
 
-    override func setUpWithError() throws {
-        audio = FileManager.default.temporaryDirectory.appendingPathComponent("texttap-test-\(UUID()).wav")
-        try Data("audio bytes".utf8).write(to: audio)
-    }
-
-    override func tearDownWithError() throws {
+    override func tearDown() {
         StubProtocol.handler = nil
-        try FileManager.default.removeItem(at: audio)
     }
 
     private func client(key: String? = "test-key") -> Transcriber {
@@ -65,7 +60,7 @@ final class TextTapTests: XCTestCase {
             XCTFail("Default configuration must not look up credentials")
             return "unused"
         })
-        let result = try await transcriber.transcribe(audioURL: audio, config: TranscriptionConfig()) { "local" }
+        let result = try await transcriber.transcribe(audio: audio, config: TranscriptionConfig()) { "local" }
         XCTAssertEqual(result, "local")
     }
 
@@ -74,7 +69,7 @@ final class TextTapTests: XCTestCase {
         for field in ["url", "model"] {
             var config = remoteTestConfig()
             if field == "url" { config.remoteURL = "" } else { config.remoteModel = "" }
-            let result = try await client().transcribe(audioURL: audio, config: config) { "local" }
+            let result = try await client().transcribe(audio: audio, config: config) { "local" }
             XCTAssertEqual(result, "local")
         }
     }
@@ -118,10 +113,10 @@ final class TextTapTests: XCTestCase {
             }
             XCTAssertTrue(body.contains(remoteTestConfig().remoteModel))
             XCTAssertTrue(body.contains("filename=\"recording.wav\""))
-            XCTAssertTrue(body.contains("audio bytes"))
+            XCTAssertNotNil(data.range(of: Transcriber.wav(self.audio)))
             stub.respond(200, #"{"text":"  remote transcript\n"}"#)
         }
-        let result = try await client().transcribe(audioURL: audio, config: remoteTestConfig()) {
+        let result = try await client().transcribe(audio: audio, config: remoteTestConfig()) {
             XCTFail("Remote success must not run local Whisper")
             return "local"
         }
@@ -130,7 +125,7 @@ final class TextTapTests: XCTestCase {
 
     func testSilenceDoesNotFallBack() async throws {
         StubProtocol.handler = { $0.respond(200, #"{"text":""}"#) }
-        let result = try await client().transcribe(audioURL: audio, config: remoteTestConfig()) {
+        let result = try await client().transcribe(audio: audio, config: remoteTestConfig()) {
             XCTFail("Silence is not a remote failure")
             return "local"
         }
@@ -141,9 +136,8 @@ final class TextTapTests: XCTestCase {
         for (status, body) in [(401, "unauthorized"), (503, "offline"), (302, "redirect"), (200, "not json"), (200, "{}"), (200, #"{"text":null}"#)] {
             StubProtocol.handler = { $0.respond(status, body) }
             var calls = 0
-            let result = try await client().transcribe(audioURL: audio, config: remoteTestConfig()) {
+            let result = try await client().transcribe(audio: audio, config: remoteTestConfig()) {
                 calls += 1
-                XCTAssertEqual(try Data(contentsOf: self.audio), Data("audio bytes".utf8))
                 return "local"
             }
             XCTAssertEqual(result, "local")
@@ -154,7 +148,7 @@ final class TextTapTests: XCTestCase {
     func testNetworkFailuresFallBack() async throws {
         for code in [URLError.notConnectedToInternet, .cannotConnectToHost, .timedOut] {
             StubProtocol.handler = { $0.client?.urlProtocol($0, didFailWithError: URLError(code)) }
-            let result = try await client().transcribe(audioURL: audio, config: remoteTestConfig()) { "local" }
+            let result = try await client().transcribe(audio: audio, config: remoteTestConfig()) { "local" }
             XCTAssertEqual(result, "local")
         }
     }
@@ -163,14 +157,14 @@ final class TextTapTests: XCTestCase {
         StubProtocol.handler = { _ in XCTFail("Must not contact endpoint") }
         var config = remoteTestConfig()
         config.remoteEnabled = false
-        let disabled = try await client().transcribe(audioURL: audio, config: config) { "local" }
+        let disabled = try await client().transcribe(audio: audio, config: config) { "local" }
         XCTAssertEqual(disabled, "local")
-        let missing = try await client(key: nil).transcribe(audioURL: audio, config: remoteTestConfig()) { "local" }
+        let missing = try await client(key: nil).transcribe(audio: audio, config: remoteTestConfig()) { "local" }
         XCTAssertEqual(missing, "local")
         config.remoteEnabled = true
         for url in ["invalid", "http://example.test/stt", "https://user:password@example.test/stt"] {
             config.remoteURL = url
-            let result = try await client().transcribe(audioURL: audio, config: config) { "local" }
+            let result = try await client().transcribe(audio: audio, config: config) { "local" }
             XCTAssertEqual(result, "local")
         }
     }
@@ -179,9 +173,9 @@ final class TextTapTests: XCTestCase {
         let started = expectation(description: "request started")
         StubProtocol.handler = { _ in started.fulfill() }
         let transcriber = client()
-        let file = audio!
+        let audio = audio
         let task = Task {
-            try await transcriber.transcribe(audioURL: file, config: remoteTestConfig()) {
+            try await transcriber.transcribe(audio: audio, config: remoteTestConfig()) {
                 XCTFail("Cancellation must not run local fallback")
                 return "local"
             }
@@ -202,7 +196,7 @@ final class TextTapTests: XCTestCase {
         config.remoteURL = "http://127.0.0.1:\(port)/transcribe"
         config.remoteTimeout = 0.2
         let started = Date()
-        let result = try await Transcriber(apiKey: { _ in "test-key" }).transcribe(audioURL: audio, config: config) { "local" }
+        let result = try await Transcriber(apiKey: { _ in "test-key" }).transcribe(audio: audio, config: config) { "local" }
         XCTAssertEqual(result, "local")
         XCTAssertLessThan(Date().timeIntervalSince(started), 2)
         XCTAssertEqual(server.requestCount, 1)
@@ -214,19 +208,60 @@ final class TextTapTests: XCTestCase {
         let port = try await server.start()
         var config = remoteTestConfig()
         config.remoteURL = "http://127.0.0.1:\(port)/transcribe"
-        let result = try await Transcriber(apiKey: { _ in "test-key" }).transcribe(audioURL: audio, config: config) { "local" }
+        let result = try await Transcriber(apiKey: { _ in "test-key" }).transcribe(audio: audio, config: config) { "local" }
         XCTAssertEqual(result, "local")
         XCTAssertEqual(server.requestCount, 1, "Redirect must not forward audio or credentials")
+    }
+
+    func testWAVEncoding() {
+        let wav = Transcriber.wav([0, 0.5, -1, 2])
+        XCTAssertEqual(wav.count, 44 + 8)
+        XCTAssertEqual(String(decoding: wav.prefix(4), as: UTF8.self), "RIFF")
+        XCTAssertEqual(String(decoding: wav[36..<40], as: UTF8.self), "data")
+        let samples = wav.suffix(8).withUnsafeBytes { Array($0.bindMemory(to: Int16.self)) }.map(Int16.init(littleEndian:))
+        XCTAssertEqual(samples, [0, 16383, -32767, 32767])
+    }
+
+    func testSegmentsCutAtPauses() {
+        var segmenter = Segmenter()
+        let speech = tone(seconds: 6)
+        let pause = [Float](repeating: 0, count: 4800)
+        XCTAssertEqual(segmenter.append(tone(seconds: 2) + pause).count, 0, "A pause before 3 seconds is not a cut")
+        let segments = segmenter.append(speech + pause + speech)
+        XCTAssertEqual(segments.map(\.count), [2 * 16000 + 4800 + 6 * 16000 + 4800])
+        XCTAssertEqual(segmenter.finish().count, 6 * 16000)
+        XCTAssertEqual(segmenter.finish().count, 0)
+    }
+
+    func testLongSpeechCutsAtQuietestPoint() {
+        var segmenter = Segmenter()
+        var audio = tone(seconds: 20)
+        let quiet = 13 * 16000
+        for i in quiet..<quiet + 1600 { audio[i] *= 0.5 }
+        let segments = segmenter.append(audio)
+        XCTAssertEqual(segments.map(\.count), [quiet + 1600])
+        XCTAssertEqual(segmenter.finish().count, audio.count - quiet - 1600)
+    }
+
+    func testSegmentJoining() {
+        XCTAssertEqual(DictationManager.join([]), "")
+        XCTAssertEqual(DictationManager.join(["We will review the budget.", "the hiring plan."]), "We will review the budget the hiring plan.")
+        XCTAssertEqual(DictationManager.join(["First sentence.", "Second one."]), "First sentence. Second one.")
+        XCTAssertEqual(DictationManager.join(["Wait...", "then go"]), "Wait... then go")
     }
 
     func testLocalErrorPropagates() async throws {
         var config = remoteTestConfig()
         config.remoteEnabled = false
         do {
-            _ = try await client().transcribe(audioURL: audio, config: config) { throw TranscriptionError.modelNotLoaded }
+            _ = try await client().transcribe(audio: audio, config: config) { throw TranscriptionError.modelNotLoaded }
             XCTFail("Local error swallowed")
         } catch TranscriptionError.modelNotLoaded {}
     }
+}
+
+private func tone(seconds: Int) -> [Float] {
+    (0..<seconds * 16000).map { 0.3 * sin(Float($0) * 2 * .pi * 220 / 16000) }
 }
 
 private final class StubProtocol: URLProtocol {
@@ -311,11 +346,11 @@ private final class LoopbackServer: @unchecked Sendable {
 }
 
 final class LiveTranscriptionTests: XCTestCase {
-    private func audioFile() throws -> URL {
+    private func audioFile() throws -> [Float] {
         guard let path = ProcessInfo.processInfo.environment["TEXTTAP_TEST_AUDIO"] else {
             throw XCTSkip("Set TEXTTAP_TEST_AUDIO to a WAV saying 'the quick brown fox' for live checks")
         }
-        return URL(fileURLWithPath: path)
+        return try AudioProcessor.loadAudioAsFloatArray(fromPath: path)
     }
 
     func testRemote() async throws {
@@ -332,7 +367,7 @@ final class LiveTranscriptionTests: XCTestCase {
             return
         }
         for _ in 0..<2 {
-            let text = try await Transcriber().transcribe(audioURL: audio, config: config.transcription) {
+            let text = try await Transcriber().transcribe(audio: audio, config: config.transcription) {
                 XCTFail("Live remote endpoint failed")
                 return ""
             }
@@ -347,9 +382,9 @@ final class LiveTranscriptionTests: XCTestCase {
         config.apiKeyEnvironment = ""
         config.remoteTimeout = 0.5
         let whisper = WhisperTranscriber()
-        let text = try await Transcriber().transcribe(audioURL: audio, config: config) {
+        let text = try await Transcriber().transcribe(audio: audio, config: config) {
             try await whisper.loadModel()
-            return try await whisper.transcribe(audioURL: audio)
+            return try await whisper.transcribe(audio: audio)
         }
         XCTAssertTrue(text.lowercased().contains("quick brown fox"))
     }

@@ -15,14 +15,14 @@ struct Transcriber {
     }
 
     func transcribe(
-        audioURL: URL,
+        audio: [Float],
         config: TranscriptionConfig,
         local: () async throws -> String
     ) async throws -> String {
         try Task.checkCancellation()
         if config.remoteEnabled {
             do {
-                let text = try await transcribeRemotely(audioURL: audioURL, config: config)
+                let text = try await transcribeRemotely(audio: audio, config: config)
                 try Task.checkCancellation()
                 return text
             } catch {
@@ -40,7 +40,7 @@ struct Transcriber {
         return text
     }
 
-    private func transcribeRemotely(audioURL: URL, config: TranscriptionConfig) async throws -> String {
+    private func transcribeRemotely(audio: [Float], config: TranscriptionConfig) async throws -> String {
         guard let url = URL(string: config.remoteURL),
               let host = url.host, !host.isEmpty,
               url.user == nil, url.password == nil, url.fragment == nil,
@@ -68,7 +68,7 @@ struct Transcriber {
             body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"\(name)\"\r\n\r\n\(value)\r\n".utf8))
         }
         body.append(Data("--\(boundary)\r\nContent-Disposition: form-data; name=\"file\"; filename=\"recording.wav\"\r\nContent-Type: audio/wav\r\n\r\n".utf8))
-        body.append(try Data(contentsOf: audioURL))
+        body.append(Self.wav(audio))
         body.append(Data("\r\n--\(boundary)--\r\n".utf8))
 
         request.httpMethod = "POST"
@@ -96,6 +96,33 @@ struct Transcriber {
         let result = try JSONDecoder().decode(TranscriptionResponse.self, from: data)
         // An empty successful transcription represents silence, not a backend failure.
         return result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+extension Transcriber {
+    /// Encodes 16 kHz mono samples as a 16-bit PCM WAV file.
+    static func wav(_ samples: [Float]) -> Data {
+        let rate = UInt32(AudioRecorder.sampleRate)
+        var data = Data()
+        func append<T: FixedWidthInteger>(_ value: T) {
+            withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
+        }
+        data.append(Data("RIFF".utf8))
+        append(UInt32(36 + samples.count * 2))
+        data.append(Data("WAVEfmt ".utf8))
+        append(UInt32(16))
+        append(UInt16(1))
+        append(UInt16(1))
+        append(rate)
+        append(rate * 2)
+        append(UInt16(2))
+        append(UInt16(16))
+        data.append(Data("data".utf8))
+        append(UInt32(samples.count * 2))
+        for sample in samples {
+            append(Int16(max(-1, min(1, sample)) * Float(Int16.max)))
+        }
+        return data
     }
 }
 

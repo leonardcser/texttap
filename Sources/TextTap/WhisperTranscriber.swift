@@ -5,10 +5,6 @@ actor WhisperTranscriber {
     private var whisperKit: WhisperKit?
     private var modelLoadTask: Task<WhisperKit, Error>?
 
-    var isReady: Bool {
-        whisperKit != nil
-    }
-
     private static let baseDirectory: URL = {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return home.appendingPathComponent(".texttap")
@@ -46,7 +42,7 @@ actor WhisperTranscriber {
         #"<\|[^|]*\|>"#,  // Special tokens like <|startoftranscript|>
     ]
 
-    func transcribe(audioURL: URL) async throws -> String {
+    func transcribe(audio: [Float]) async throws -> String {
         guard let whisperKit = whisperKit else {
             print("[TextTap] WhisperKit not initialized")
             throw TranscriptionError.modelNotLoaded
@@ -58,9 +54,8 @@ actor WhisperTranscriber {
             chunkingStrategy: .vad
         )
 
-        print("[TextTap] Starting WhisperKit transcription for \(audioURL.lastPathComponent)")
-        let results = try await whisperKit.transcribe(
-            audioPath: audioURL.path,
+        let results: [TranscriptionResult] = try await whisperKit.transcribe(
+            audioArray: audio,
             decodeOptions: options
         )
 
@@ -85,22 +80,15 @@ actor WhisperTranscriber {
         let finalText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         return finalText
     }
-
-    func unload() {
-        whisperKit = nil
-    }
 }
 
 enum TranscriptionError: Error, LocalizedError {
     case modelNotLoaded
-    case transcriptionFailed(String)
 
     var errorDescription: String? {
         switch self {
         case .modelNotLoaded:
             return "Whisper model is not loaded"
-        case .transcriptionFailed(let reason):
-            return "Transcription failed: \(reason)"
         }
     }
 }
