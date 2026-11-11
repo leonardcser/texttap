@@ -66,6 +66,7 @@ language = "en"
 
 [indicator]
 enabled = true                # Show waveform indicator near cursor
+preview = true                # Show words live while speaking (macOS 26+)
 width = 44                    # Indicator width in pixels
 height = 18                   # Indicator height in pixels
 offset_x = 8                  # Horizontal offset from cursor

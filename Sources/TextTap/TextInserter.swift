@@ -1,132 +1,46 @@
 import Cocoa
 import ApplicationServices
 
-final class TextInserter: @unchecked Sendable {
-    // Delay between keystrokes in microseconds (1000 = 1ms)
-    private let keystrokeDelay: useconds_t = 1000
+/// Inserts text at the cursor of the focused app.
+struct TextInserter {
+    private static let textRoles: Set<String> = [kAXTextFieldRole, kAXTextAreaRole]
 
-    // Roles that might support Accessibility text insertion
-    private let textInputRoles: Set<String> = [
-        kAXTextFieldRole as String,
-        kAXTextAreaRole as String
-    ]
-
-    func insertIncremental(_ text: String) {
-        print("[TextTap] Inserting transcription (\(text.count) characters)")
-        guard !text.isEmpty else {
-            print("[TextTap] Text is empty, nothing to insert")
-            return
-        }
-
-        // Only attempt Accessibility API for known text input roles
-        if let (element, role) = getFocusedElement(), textInputRoles.contains(role) {
-            print("[TextTap] Focused element has role: \(role), trying Accessibility API")
-            if insertTextViaAccessibility(element: element, text: text) {
-                print("[TextTap] Accessibility API insertion succeeded")
-                return
-            }
-            print("[TextTap] Accessibility API insertion failed, falling back to keyboard")
-        } else {
-            print("[TextTap] No text input element focused or unknown role, using keyboard simulation")
-        }
-
-        // Use typing for everything else - works universally including terminals
-        typeText(text)
-        print("[TextTap] Keyboard simulation completed")
+    /// Replaces the selection of a standard text field through Accessibility, or types the
+    /// text, which works everywhere including terminals.
+    func insert(_ text: String) {
+        guard !text.isEmpty else { return }
+        if let element = Caret.focusedElement(), Self.replaceSelection(element, with: text) { return }
+        Self.type(text)
     }
 
-    private func getFocusedElement() -> (AXUIElement, String)? {
-        let systemWide = AXUIElementCreateSystemWide()
-
-        var focusedElement: AnyObject?
-        let result = AXUIElementCopyAttributeValue(
-            systemWide,
-            kAXFocusedUIElementAttribute as CFString,
-            &focusedElement
-        )
-
-        guard result == .success, let element = focusedElement else {
-            return nil
-        }
-
-        let axElement = element as! AXUIElement
-
+    private static func replaceSelection(_ element: AXUIElement, with text: String) -> Bool {
         var role: AnyObject?
-        let roleResult = AXUIElementCopyAttributeValue(
-            axElement,
-            kAXRoleAttribute as CFString,
-            &role
-        )
-
-        guard roleResult == .success, let roleString = role as? String else {
-            return nil
-        }
-
-        return (axElement, roleString)
-    }
-
-    private func getElementValue(_ element: AXUIElement) -> String? {
-        var value: AnyObject?
-        let result = AXUIElementCopyAttributeValue(
-            element,
-            kAXValueAttribute as CFString,
-            &value
-        )
-        guard result == .success, let stringValue = value as? String else {
-            return nil
-        }
-        return stringValue
-    }
-
-    private func insertTextViaAccessibility(element: AXUIElement, text: String) -> Bool {
-        // Get current value to verify change afterwards
-        let valueBefore = getElementValue(element)
-
-        // Try to set the selected text (replaces selection)
-        let setResult = AXUIElementSetAttributeValue(
-            element,
-            kAXSelectedTextAttribute as CFString,
-            text as CFTypeRef
-        )
-
-        guard setResult == .success else {
+        guard AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role) == .success,
+              let role = role as? String, textRoles.contains(role) else { return false }
+        let before = value(element)
+        guard AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFString) == .success else {
             return false
         }
-
-        // Verify the text actually changed - some apps return success but don't insert
-        let valueAfter = getElementValue(element)
-
-        // If we can read values and they're the same, the insert failed
-        if let before = valueBefore, let after = valueAfter {
-            if before == after {
-                return false
-            }
-        }
-
-        return true
+        // Some apps report success without changing anything.
+        guard let before, let after = value(element) else { return true }
+        return before != after
     }
 
-    private func typeText(_ text: String) {
-        // Type character by character for maximum compatibility with terminals
-        // This approach is used by Hammerspoon, TextExpander, and Keyboard Maestro
+    private static func value(_ element: AXUIElement) -> String? {
+        var value: AnyObject?
+        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success else { return nil }
+        return value as? String
+    }
+
+    private static func type(_ text: String) {
         let source = CGEventSource(stateID: .privateState)
-
-        for char in text {
-            let utf16Chars = Array(char.utf16)
-
-            // Create key down event with the unicode character
-            if let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true) {
-                keyDown.keyboardSetUnicodeString(stringLength: utf16Chars.count, unicodeString: utf16Chars)
-                keyDown.post(tap: .cgAnnotatedSessionEventTap)
-            }
-
-            // Create key up event
-            if let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) {
-                keyUp.post(tap: .cgAnnotatedSessionEventTap)
-            }
-
-            // Small delay between keystrokes for reliability
-            usleep(keystrokeDelay)
+        for character in text {
+            let utf16 = Array(character.utf16)
+            let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true)
+            down?.keyboardSetUnicodeString(stringLength: utf16.count, unicodeString: utf16)
+            down?.post(tap: .cgAnnotatedSessionEventTap)
+            CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false)?.post(tap: .cgAnnotatedSessionEventTap)
+            usleep(1000)  // Some apps drop characters typed faster
         }
     }
 }

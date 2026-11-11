@@ -1,59 +1,57 @@
 import Foundation
-import Security
 import LocalAuthentication
+import Security
+import WhisperKit
 
-struct Transcriber {
-    private let sessionConfiguration: URLSessionConfiguration
-    private let apiKey: (String) -> String?
+/// Transcribes 16 kHz mono speech.
+protocol SpeechToText {
+    func transcribe(_ audio: [Float]) async throws -> String
+}
 
-    init(
-        sessionConfiguration: URLSessionConfiguration = .ephemeral,
-        apiKey: @escaping (String) -> String? = TranscriptionCredentials.apiKey
-    ) {
-        self.sessionConfiguration = sessionConfiguration
-        self.apiKey = apiKey
-    }
+/// Uses `primary`, and `fallback` when `primary` fails for any reason except cancellation.
+struct FallbackSpeechToText: SpeechToText {
+    let primary: SpeechToText
+    let fallback: SpeechToText
 
-    func transcribe(
-        audio: [Float],
-        config: TranscriptionConfig,
-        local: () async throws -> String
-    ) async throws -> String {
-        try Task.checkCancellation()
-        if config.remoteEnabled {
-            do {
-                let text = try await transcribeRemotely(audio: audio, config: config)
-                try Task.checkCancellation()
-                return text
-            } catch {
-                try Task.checkCancellation()
-                if error is CancellationError || (error as? URLError)?.code == .cancelled {
-                    throw CancellationError()
-                }
-                // Do not log credentials, recordings, transcripts, or server response bodies.
-                print("[TextTap] Remote transcription unavailable; using local Whisper")
+    func transcribe(_ audio: [Float]) async throws -> String {
+        do {
+            let text = try await primary.transcribe(audio)
+            try Task.checkCancellation()
+            return text
+        } catch {
+            try Task.checkCancellation()
+            if error is CancellationError || (error as? URLError)?.code == .cancelled {
+                throw CancellationError()
             }
+            // Do not log credentials, recordings, transcripts, or server response bodies.
+            print("[TextTap] Remote transcription unavailable; using local Whisper")
         }
-        try Task.checkCancellation()
-        let text = try await local()
-        try Task.checkCancellation()
-        return text
+        return try await fallback.transcribe(audio)
     }
+}
 
-    private func transcribeRemotely(audio: [Float], config: TranscriptionConfig) async throws -> String {
+// MARK: - Remote
+
+/// An OpenAI-compatible audio transcription endpoint.
+struct RemoteSpeechToText: SpeechToText {
+    let config: TranscriptionConfig
+    var sessionConfiguration: URLSessionConfiguration = .ephemeral
+    var apiKey: (String) -> String? = Credentials.apiKey
+
+    func transcribe(_ audio: [Float]) async throws -> String {
         guard let url = URL(string: config.remoteURL),
               let host = url.host, !host.isEmpty,
               url.user == nil, url.password == nil, url.fragment == nil,
               url.scheme == "https" || (url.scheme == "http" && ["localhost", "127.0.0.1", "[::1]"].contains(host)),
               !config.remoteModel.isEmpty,
               config.remoteTimeout.isFinite, config.remoteTimeout > 0 else {
-            throw RemoteTranscriptionError.invalidConfiguration
+            throw RemoteError.invalidConfiguration
         }
         var request = URLRequest(url: url)
         if !config.apiKeyEnvironment.isEmpty {
             guard let key = apiKey(config.apiKeyEnvironment)?.trimmingCharacters(in: .whitespacesAndNewlines),
                   !key.isEmpty, key.rangeOfCharacter(from: .newlines) == nil else {
-                throw RemoteTranscriptionError.missingAPIKey
+                throw RemoteError.missingAPIKey
             }
             request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         }
@@ -84,25 +82,21 @@ struct Transcriber {
         settings.urlCache = nil
         settings.httpCookieStorage = nil
         settings.urlCredentialStorage = nil
-        let session = URLSession(configuration: settings, delegate: NoTranscriptionRedirects(), delegateQueue: nil)
+        let session = URLSession(configuration: settings, delegate: NoRedirects(), delegateQueue: nil)
         defer { session.invalidateAndCancel() }
 
-        try Task.checkCancellation()
         let (data, response) = try await session.data(for: request)
-        guard let response = response as? HTTPURLResponse,
-              (200..<300).contains(response.statusCode) else {
-            throw RemoteTranscriptionError.serverResponse
+        guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode) else {
+            throw RemoteError.serverResponse
         }
-        let result = try JSONDecoder().decode(TranscriptionResponse.self, from: data)
         // An empty successful transcription represents silence, not a backend failure.
-        return result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return try JSONDecoder().decode(Response.self, from: data).text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
-}
 
-extension Transcriber {
     /// Encodes 16 kHz mono samples as a 16-bit PCM WAV file.
     static func wav(_ samples: [Float]) -> Data {
-        let rate = UInt32(AudioRecorder.sampleRate)
+        let rate = UInt32(Recorder.sampleRate)
         var data = Data()
         func append<T: FixedWidthInteger>(_ value: T) {
             withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
@@ -120,23 +114,23 @@ extension Transcriber {
         data.append(Data("data".utf8))
         append(UInt32(samples.count * 2))
         for sample in samples {
-            append(Int16(max(-1, min(1, sample)) * Float(Int16.max)))
+            append(Recorder.pcm16(sample))
         }
         return data
     }
+
+    private struct Response: Decodable {
+        let text: String
+    }
 }
 
-private struct TranscriptionResponse: Decodable {
-    let text: String
-}
-
-private enum RemoteTranscriptionError: Error {
+enum RemoteError: Error {
     case invalidConfiguration
     case missingAPIKey
     case serverResponse
 }
 
-private final class NoTranscriptionRedirects: NSObject, URLSessionTaskDelegate {
+private final class NoRedirects: NSObject, URLSessionTaskDelegate {
     func urlSession(
         _ session: URLSession,
         task: URLSessionTask,
@@ -149,7 +143,8 @@ private final class NoTranscriptionRedirects: NSObject, URLSessionTaskDelegate {
     }
 }
 
-enum TranscriptionCredentials {
+/// The remote API key, from its environment variable or the Keychain.
+enum Credentials {
     static let keychainService = "com.leo.texttap.stt"
 
     static func storeAPIKeyFromEnvironment(environmentVariable: String) -> OSStatus {
@@ -189,5 +184,69 @@ enum TranscriptionCredentials {
         guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess,
               let data = item as? Data else { return nil }
         return String(data: data, encoding: .utf8)
+    }
+}
+
+// MARK: - Local
+
+/// Transcribes with the shared local Whisper model.
+struct LocalSpeechToText: SpeechToText {
+    let whisper: Whisper
+    let language: String
+
+    func transcribe(_ audio: [Float]) async throws -> String {
+        try Task.checkCancellation()
+        return try await whisper.transcribe(audio, language: language)
+    }
+}
+
+/// The local WhisperKit model, loaded once and shared by every dictation.
+actor Whisper {
+    private let model: String
+    private var loading: Task<WhisperKit, Error>?
+
+    // Whisper marks non-speech in brackets and parentheses, and may leak special tokens.
+    private static let artifacts = [#"\[[^\]]*\]"#, #"\([^)]*\)"#, #"<\|[^|]*\|>"#]
+        .map { try! NSRegularExpression(pattern: $0) }
+
+    init(model: String) {
+        self.model = model
+    }
+
+    func preload() async {
+        do {
+            _ = try await kit()
+        } catch {
+            print("[TextTap] Local Whisper preload failed; will retry when needed")
+        }
+    }
+
+    func transcribe(_ audio: [Float], language: String) async throws -> String {
+        let kit = try await kit()
+        // Without VAD, Whisper's seek loop can jump forward on long audio and skip segments.
+        let options = DecodingOptions(language: language, chunkingStrategy: .vad)
+        let results: [TranscriptionResult] = try await kit.transcribe(audioArray: audio, decodeOptions: options)
+        var text = results.map(\.text).joined(separator: " ")
+        for artifact in Self.artifacts {
+            text = artifact.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "")
+        }
+        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func kit() async throws -> WhisperKit {
+        if loading == nil {
+            let model = model
+            loading = Task {
+                let base = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".texttap")
+                try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+                return try await WhisperKit(WhisperKitConfig(model: model, downloadBase: base, load: true, download: true))
+            }
+        }
+        do {
+            return try await loading!.value
+        } catch {
+            loading = nil
+            throw error
+        }
     }
 }

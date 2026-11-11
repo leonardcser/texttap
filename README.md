@@ -27,6 +27,11 @@ make install   # Build and install to /Applications
 - **Escape** cancels without inserting text.
 
 Text appears at the cursor. Select existing text first to replace it.
+While you speak, the indicator next to the cursor previews the text. Whisper's
+transcript of each finished phrase appears solid, exactly as it will be inserted.
+The words after it appear dimmed as you say them, from Apple's on-device recognizer
+on macOS 26+, and may still change. Set `preview = false` under `[indicator]` to
+hide the text.
 Whisper downloads its local model on first launch, then works offline.
 
 ## Configuration
