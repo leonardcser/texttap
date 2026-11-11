@@ -110,7 +110,7 @@ final class Overlay {
             origin.x = max(visible.minX, min(origin.x, visible.maxX - size.width))
             origin.y = max(visible.minY, min(origin.y, visible.maxY - size.height))
         }
-        panel.setFrameOrigin(origin)
+        if panel.frame.origin != origin { panel.setFrameOrigin(origin) }
     }
 
     private static func color(_ name: String) -> NSColor {

@@ -201,52 +201,36 @@ struct LocalSpeechToText: SpeechToText {
 }
 
 /// The local WhisperKit model, loaded once and shared by every dictation.
-actor Whisper {
-    private let model: String
-    private var loading: Task<WhisperKit, Error>?
+struct Whisper {
+    private let kit: ModelLoader<WhisperKit>
 
     // Whisper marks non-speech in brackets and parentheses, and may leak special tokens.
     private static let artifacts = [#"\[[^\]]*\]"#, #"\([^)]*\)"#, #"<\|[^|]*\|>"#]
         .map { try! NSRegularExpression(pattern: $0) }
 
     init(model: String) {
-        self.model = model
-    }
-
-    func preload() async {
-        do {
-            _ = try await kit()
-        } catch {
-            print("[TextTap] Local Whisper preload failed; will retry when needed")
+        kit = ModelLoader("Local Whisper") {
+            let base = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".texttap")
+            try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+            return try await WhisperKit(WhisperKitConfig(model: model, downloadBase: base, load: true, download: true))
         }
     }
 
+    func preload() async {
+        await kit.preload()
+    }
+
     func transcribe(_ audio: [Float], language: String) async throws -> String {
-        let kit = try await kit()
-        // Without VAD, Whisper's seek loop can jump forward on long audio and skip segments.
-        let options = DecodingOptions(language: language, chunkingStrategy: .vad)
+        let kit = try await kit.model()
+        // Silero has already found speech in `audio`. Whisper's first-token check treats leading
+        // silence as no speech and retries with random sampling, which can drop the whole part.
+        // Without VAD chunking, Whisper's seek loop can jump forward on long audio and skip segments.
+        let options = DecodingOptions(language: language, firstTokenLogProbThreshold: nil, chunkingStrategy: .vad)
         let results: [TranscriptionResult] = try await kit.transcribe(audioArray: audio, decodeOptions: options)
         var text = results.map(\.text).joined(separator: " ")
         for artifact in Self.artifacts {
             text = artifact.stringByReplacingMatches(in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "")
         }
         return text.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private func kit() async throws -> WhisperKit {
-        if loading == nil {
-            let model = model
-            loading = Task {
-                let base = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".texttap")
-                try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
-                return try await WhisperKit(WhisperKitConfig(model: model, downloadBase: base, load: true, download: true))
-            }
-        }
-        do {
-            return try await loading!.value
-        } catch {
-            loading = nil
-            throw error
-        }
     }
 }

@@ -2,16 +2,19 @@ import Cocoa
 import AVFoundation
 
 /// Connects the hotkey and the menu bar item to dictation, and asks for permissions.
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
-    private var whisper: Whisper!
+    // Changing the local model takes effect after a restart.
+    private let whisper = Whisper(model: Config.shared.transcription.model)
+    private let vad = SileroVAD()
     private var dictation: Dictation!
     private var hotkey: Hotkey!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let config = Config.shared
-        whisper = Whisper(model: config.transcription.model)
         Task { await whisper.preload() }
+        Task { await vad.preload() }
         dictation = makeDictation(config)
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -35,7 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func makeDictation(_ config: Config) -> Dictation {
-        let dictation = Dictation(config: config, whisper: whisper)
+        let dictation = Dictation(config: config, whisper: whisper, vad: vad)
         dictation.onStateChange = { [weak self] in self?.showState($0) }
         return dictation
     }

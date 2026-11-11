@@ -14,22 +14,14 @@ struct TextInserter {
     }
 
     private static func replaceSelection(_ element: AXUIElement, with text: String) -> Bool {
-        var role: AnyObject?
-        guard AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &role) == .success,
-              let role = role as? String, textRoles.contains(role) else { return false }
-        let before = value(element)
+        guard let role: String = Caret.attribute(element, kAXRoleAttribute), textRoles.contains(role) else { return false }
+        let before: String? = Caret.attribute(element, kAXValueAttribute)
         guard AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFString) == .success else {
             return false
         }
         // Some apps report success without changing anything.
-        guard let before, let after = value(element) else { return true }
+        guard let before, let after: String = Caret.attribute(element, kAXValueAttribute) else { return true }
         return before != after
-    }
-
-    private static func value(_ element: AXUIElement) -> String? {
-        var value: AnyObject?
-        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success else { return nil }
-        return value as? String
     }
 
     private static func type(_ text: String) {

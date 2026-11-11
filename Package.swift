@@ -10,12 +10,13 @@ let package = Package(
         .executable(name: "TextTap", targets: ["TextTap"])
     ],
     dependencies: [
-        .package(url: "https://github.com/argmaxinc/WhisperKit", from: "0.9.0")
+        .package(url: "https://github.com/argmaxinc/WhisperKit", from: "0.9.0"),
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.18.3"),
     ],
     targets: [
         .executableTarget(
             name: "TextTap",
-            dependencies: ["WhisperKit"],
+            dependencies: ["WhisperKit", .product(name: "FluidAudio", package: "FluidAudio")],
             path: "Sources/TextTap"
         ),
         .testTarget(

@@ -1,5 +1,6 @@
 @testable import TextTap
 import XCTest
+import FluidAudio
 import Network
 import WhisperKit
 
@@ -250,48 +251,54 @@ final class TextTapTests: XCTestCase {
         XCTAssertEqual(samples, [0, 16383, -32767, 32767])
     }
 
-    func testSegmentsCutAtPauses() {
-        var segmenter = Segmenter()
-        let speech = tone(seconds: 6)
-        let pause = [Float](repeating: 0, count: 4800)
-        XCTAssertEqual(segmenter.append(tone(seconds: 2) + pause).count, 0, "A pause before 3 seconds is not a cut")
-        let segments = segmenter.append(speech + pause + speech)
-        XCTAssertEqual(segments.map(\.count), [2 * 16000 + 4800 + 6 * 16000 + 4800])
-        XCTAssertEqual(segmenter.finish().count, 6 * 16000)
-        XCTAssertEqual(segmenter.finish().count, 0)
+    func testSegmentsEndWhereSpeechEnds() async throws {
+        var segmenter = Segmenter(detector: ScriptedDetector(speech: [span(0, 2), span(3, 6)]))
+        let segments = try await segmenter.append(silence(seconds: 7))
+        XCTAssertEqual(segments.map(\.end), [8 * VadManager.chunkSize, 24 * VadManager.chunkSize])
+        // The second segment keeps 0.5 s before speech starts in chunk 12, and ends with the speech.
+        XCTAssertEqual(segments[1].audio.count, 24 * VadManager.chunkSize - (12 * VadManager.chunkSize - Segmenter.preRollLength))
+        let rest = try await segmenter.finish()
+        XCTAssertEqual(rest.count, 0)
     }
 
-    func testLongSpeechCutsAtQuietestPoint() {
-        var segmenter = Segmenter()
-        var audio = tone(seconds: 20)
-        let quiet = 13 * 16000
-        for i in quiet..<quiet + 1600 { audio[i] *= 0.5 }
-        let segments = segmenter.append(audio)
-        XCTAssertEqual(segments.map(\.count), [quiet + 1600])
-        XCTAssertEqual(segmenter.finish().count, audio.count - quiet - 1600)
+    func testSilenceIsNotReturned() async throws {
+        var segmenter = Segmenter(detector: ScriptedDetector(speech: []))
+        let segments = try await segmenter.append(silence(seconds: 30))
+        XCTAssertEqual(segments.count, 0)
+        let rest = try await segmenter.finish()
+        XCTAssertEqual(rest.count, 0)
     }
 
-    func testKeyClicksAreNotSpeech() {
-        var segmenter = Segmenter()
-        _ = segmenter.append(tone(seconds: 1))
-        let quiet = [Float](repeating: 0.001, count: 4000)
-        let clicks = (0..<4).flatMap { _ in click() + quiet }
-        XCTAssertFalse(segmenter.containsSpeech(quiet + clicks))
-        XCTAssertFalse(segmenter.containsSpeech([]))
-        XCTAssertTrue(segmenter.containsSpeech(quiet + Array(tone(seconds: 1).prefix(4000)) + quiet), "A 250 ms word is speech")
+    func testLongSpeechCutsAtQuietestChunk() async throws {
+        // The 20 s limit is reached in chunk 78. Chunk 71 is the quietest of its last 3 s.
+        var segmenter = Segmenter(detector: ScriptedDetector(speech: [span(0, 25)], quiet: [span(18, 18.2)]))
+        let segments = try await segmenter.append(tone(seconds: 25))
+        XCTAssertEqual(segments.map(\.end), [72 * VadManager.chunkSize])
+        let rest = try await segmenter.finish()
+        XCTAssertEqual(rest.map(\.end), [98 * VadManager.chunkSize])
     }
 
+    @MainActor
+    func testDetectorFailureFailsTheDictation() async throws {
+        let session = DictationSession(speechToText: StubSpeechToText()) { throw StubError() }
+        session.append(tone(seconds: 1))
+        do {
+            _ = try await session.finish()
+            XCTFail("Expected the detector error")
+        } catch is StubError {}
+    }
+
+    @MainActor
     func testPartsWithoutSpeechAreNotTranscribed() async throws {
         let speech = StubSpeechToText()
-        let session = DictationSession(speechToText: speech)
-        let pause = [Float](repeating: 0, count: 4800)
-        session.append(tone(seconds: 4) + pause)
-        session.append(pause + click() + pause + click())
+        let session = DictationSession(speechToText: speech) { ScriptedDetector(speech: [span(0, 4)]) }
+        session.append(tone(seconds: 4) + silence(seconds: 4))
         let text = try await session.finish()
         XCTAssertEqual(text, "local")
         XCTAssertEqual(speech.calls, 1, "Only the spoken part is transcribed")
     }
 
+    @MainActor
     func testSegmentJoining() {
         XCTAssertEqual(DictationSession.join([]), "")
         XCTAssertEqual(DictationSession.join(["We will review the budget.", "the hiring plan."]), "We will review the budget the hiring plan.")
@@ -299,46 +306,55 @@ final class TextTapTests: XCTestCase {
         XCTAssertEqual(DictationSession.join(["Wait...", "then go"]), "Wait... then go")
     }
 
+    @MainActor
     func testSessionTranscribesPartsInOrderAndDropsNoise() async throws {
-        // Parts run concurrently, so each reply depends only on its part's length in seconds.
-        struct BySeconds: SpeechToText {
+        // Each part is told apart by its loudness, and the loudest one finishes last.
+        struct ByLoudness: SpeechToText {
             func transcribe(_ audio: [Float]) async throws -> String {
-                try await Task.sleep(for: .milliseconds(audio.count > 70_000 ? 50 : 0))
-                return [4: "First part.", 5: ".", 1: "second part."][audio.count / 16000]!
+                let peak = audio.map(abs).max() ?? 0
+                if peak > 0.25 {
+                    try await Task.sleep(for: .milliseconds(50))
+                    return "First part."
+                }
+                return peak > 0.15 ? "second part." : "."
             }
         }
-        let session = DictationSession(speechToText: BySeconds())
-        let pause = [Float](repeating: 0, count: 4800)
-        session.append(tone(seconds: 4) + pause + tone(seconds: 5) + pause)
-        session.append(tone(seconds: 1))
+        let session = DictationSession(speechToText: ByLoudness()) {
+            ScriptedDetector(speech: [span(0, 4), span(4.8, 9.8), span(10.6, 11.6)])
+        }
+        let pause = silence(seconds: 0.8)
+        session.append(tone(seconds: 4, amplitude: 0.3) + pause + tone(seconds: 5, amplitude: 0.2) + pause + tone(seconds: 1, amplitude: 0.1) + pause)
         let text = try await session.finish()
         XCTAssertEqual(text, "First part second part.")
     }
 
+    @MainActor
     func testProgressReportsOnlyFinishedLeadingParts() async throws {
         // The second part finishes first but is reported only with the first, once both are done.
         struct FirstIsSlow: SpeechToText {
             func transcribe(_ audio: [Float]) async throws -> String {
-                if audio.count > 70_000 {
+                if (audio.map(abs).max() ?? 0) > 0.25 {
                     try await Task.sleep(for: .milliseconds(100))
                     return "One."
                 }
                 return "two."
             }
         }
-        let session = DictationSession(speechToText: FirstIsSlow())
+        let session = DictationSession(speechToText: FirstIsSlow()) {
+            ScriptedDetector(speech: [span(0, 5), span(5.8, 9.8)])
+        }
         var progress: [(String, TimeInterval)] = []
         let reported = expectation(description: "progress")
         session.onProgress = { text, time in
             progress.append((text, time))
             reported.fulfill()
         }
-        let pause = [Float](repeating: 0, count: 4800)
-        session.append(tone(seconds: 5) + pause + tone(seconds: 4) + pause)
+        let pause = silence(seconds: 0.8)
+        session.append(tone(seconds: 5, amplitude: 0.3) + pause + tone(seconds: 4, amplitude: 0.2) + pause)
         await fulfillment(of: [reported], timeout: 2)
         try await Task.sleep(for: .milliseconds(100))
         XCTAssertEqual(progress.map(\.0), ["One two."])
-        XCTAssertEqual(progress.map(\.1), [9.6])
+        XCTAssertEqual(progress.map(\.1), [9.984], "The second part ends at the first silent chunk after 9.8 s")
     }
 
     func testPreviewShowsLiveWordsAfterTheTranscript() {
@@ -363,15 +379,44 @@ final class TextTapTests: XCTestCase {
     }
 }
 
-private func tone(seconds: Int) -> [Float] {
-    (0..<seconds * 16000).map { 0.3 * sin(Float($0) * 2 * .pi * 220 / 16000) }
+private func tone(seconds: Double, amplitude: Float = 0.3) -> [Float] {
+    (0..<Int(seconds * 16000)).map { amplitude * sin(Float($0) * 2 * .pi * 220 / 16000) }
 }
 
-/// A loud key click that rings for about 40 ms.
-private func click() -> [Float] {
-    (0..<800).map { (i: Int) -> Float in
-        let t = Float(i)
-        return 0.5 * exp(-t / 160) * sin(t * 2 * .pi * 2500 / 16000)
+private func silence(seconds: Double) -> [Float] {
+    [Float](repeating: 0, count: Int(seconds * 16000))
+}
+
+/// Recording sample range from `start` to `end` seconds.
+private func span(_ start: Double, _ end: Double) -> Range<Int> {
+    Int(start * 16000)..<Int(end * 16000)
+}
+
+/// Stands in for Silero. Chunks are speech inside `speech`, with the start and end events the
+/// real detector reports at chunk boundaries. Speech inside `quiet` has a lower probability.
+private final class ScriptedDetector: SpeechDetector {
+    private let speech: [Range<Int>]
+    private let quiet: [Range<Int>]
+    private var chunks = 0
+    private var wasSpeech = false
+
+    init(speech: [Range<Int>], quiet: [Range<Int>] = []) {
+        self.speech = speech
+        self.quiet = quiet
+    }
+
+    func detect(_ chunk: [Float], state: VadStreamState) async throws -> VadStreamResult {
+        let start = chunks * VadManager.chunkSize
+        chunks += 1
+        let isSpeech = speech.contains { $0.contains(start) }
+        let event: VadStreamEvent? = isSpeech == wasSpeech
+            ? nil
+            : VadStreamEvent(kind: isSpeech ? .speechStart : .speechEnd, sampleIndex: start)
+        wasSpeech = isSpeech
+        var next = state
+        next.triggered = isSpeech
+        let probability: Float = !isSpeech ? 0.1 : quiet.contains { $0.contains(start) } ? 0.4 : 0.9
+        return VadStreamResult(state: next, event: event, probability: probability)
     }
 }
 

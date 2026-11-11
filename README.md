@@ -32,7 +32,7 @@ transcript of each finished phrase appears solid, exactly as it will be inserted
 The words after it appear dimmed as you say them, from Apple's on-device recognizer
 on macOS 26+, and may still change. Set `preview = false` under `[indicator]` to
 hide the text.
-Whisper downloads its local model on first launch, then works offline.
+Whisper and the Silero voice activity model download on first launch, then work offline.
 
 ## Configuration
 

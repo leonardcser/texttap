@@ -6,8 +6,8 @@ final class Recorder {
 
     private var engine: AVAudioEngine?
 
-    /// Starts recording. `onSamples` receives each captured buffer on the main queue.
-    func start(onSamples: @escaping ([Float]) -> Void) throws {
+    /// Starts recording. `onSamples` receives each captured buffer on the main actor.
+    func start(onSamples: @escaping @MainActor ([Float]) -> Void) throws {
         let engine = AVAudioEngine()
         let input = engine.inputNode
         let inputFormat = input.outputFormat(forBus: 0)
@@ -33,7 +33,7 @@ final class Recorder {
             }
             guard error == nil, let channel = output.floatChannelData?[0] else { return }
             let samples = Array(UnsafeBufferPointer(start: channel, count: Int(output.frameLength)))
-            DispatchQueue.main.async { onSamples(samples) }
+            DispatchQueue.main.async { MainActor.assumeIsolated { onSamples(samples) } }
         }
 
         try engine.start()

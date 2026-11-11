@@ -7,6 +7,7 @@ enum DictationState {
 }
 
 /// Records speech, shows it in the overlay, and inserts the transcript at the cursor.
+@MainActor
 final class Dictation {
     var onStateChange: (DictationState) -> Void = { _ in }
     private(set) var state = DictationState.idle {
@@ -15,6 +16,7 @@ final class Dictation {
 
     private let config: Config
     private let whisper: Whisper
+    private let vad: SileroVAD
     private let recorder = Recorder()
     private let overlay: Overlay
     private let inserter = TextInserter()
@@ -22,9 +24,10 @@ final class Dictation {
     private var recognizer: LiveRecognizer?
     private var preview = PreviewText()
 
-    init(config: Config, whisper: Whisper) {
+    init(config: Config, whisper: Whisper, vad: SileroVAD) {
         self.config = config
         self.whisper = whisper
+        self.vad = vad
         overlay = Overlay(config: config.indicator)
     }
 
@@ -39,7 +42,7 @@ final class Dictation {
 
     func start() {
         guard state == .idle else { return }
-        let session = DictationSession(speechToText: speechToText())
+        let session = DictationSession(speechToText: speechToText()) { [vad] in try await vad.model() }
         var recognizer: LiveRecognizer?
         if config.indicator.enabled && config.indicator.preview {
             session.onProgress = { [weak self] text, time in
@@ -124,9 +127,10 @@ final class Dictation {
 
 /// Transcribes one recording in parts cut at pauses, while recording continues, so only
 /// the last part remains when recording stops.
+@MainActor
 final class DictationSession {
-    /// Receives, on the main queue, the transcript of the leading parts that are finished
-    /// and the recording time they cover, each time it grows.
+    /// Receives the transcript of the leading parts that are finished and the recording time
+    /// they cover, each time it grows.
     var onProgress: (String, TimeInterval) -> Void = { _, _ in }
 
     private struct Part {
@@ -136,24 +140,35 @@ final class DictationSession {
     }
 
     private let speechToText: SpeechToText
-    private var segmenter = Segmenter()
+    private let audio: AsyncStream<[Float]>.Continuation
+    private var segmenting: Task<Void, Error>?
     private var parts: [Part] = []
-    private var transcribedSamples = 0
 
     // Whisper output that is only noise
     private static let noise: Set<String> = ["[", "]", "(", ")", ".", ",", "!", "?", "-", "—", "..."]
 
-    init(speechToText: SpeechToText) {
+    /// `detector` provides the speech detector, which may still be loading.
+    init(speechToText: SpeechToText, detector: @escaping () async throws -> any SpeechDetector) {
         self.speechToText = speechToText
+        let (stream, audio) = AsyncStream<[Float]>.makeStream()
+        self.audio = audio
+        segmenting = Task {
+            var segmenter = Segmenter(detector: try await detector())
+            for await samples in stream {
+                for segment in try await segmenter.append(samples) { transcribe(segment) }
+            }
+            for segment in try await segmenter.finish() { transcribe(segment) }
+        }
     }
 
     func append(_ samples: [Float]) {
-        segmenter.append(samples).forEach(transcribe)
+        audio.yield(samples)
     }
 
-    /// Transcribes the remaining audio and returns the whole transcript.
+    /// Waits for the remaining audio to be transcribed and returns the whole transcript.
     func finish() async throws -> String {
-        transcribe(segmenter.finish())
+        audio.finish()
+        try await segmenting?.value
         var texts: [String] = []
         for part in parts {
             texts.append(try await part.task.value)
@@ -162,21 +177,21 @@ final class DictationSession {
     }
 
     func cancel() {
+        audio.finish()
+        segmenting?.cancel()
         parts.forEach { $0.task.cancel() }
     }
 
-    /// Whisper invents text such as "Thank you." for audio without speech, so such parts,
-    /// like the noise and key clicks after the last pause, are skipped.
-    private func transcribe(_ audio: [Float]) {
-        transcribedSamples += audio.count
-        guard segmenter.containsSpeech(audio) else { return }
+    private func transcribe(_ segment: Segment) {
+        guard !segment.audio.isEmpty else { return }
         let speechToText = speechToText
+        let audio = segment.audio
         let task = Task { try await speechToText.transcribe(audio) }
-        parts.append(Part(task: task, end: transcribedSamples))
+        parts.append(Part(task: task, end: segment.end))
         let index = parts.count - 1
         Task { [weak self] in
             guard let text = try? await task.value else { return }
-            DispatchQueue.main.async { self?.finished(index, text) }
+            self?.finished(index, text)
         }
     }
 
@@ -226,71 +241,5 @@ struct PreviewText {
 
     mutating func update(_ words: [TimedText]) {
         self.words = words
-    }
-}
-
-/// Splits audio at pauses. A segment ends after 300 ms below a tenth of the loudest level
-/// so far once it is at least 3 seconds long, or at the quietest point of its last
-/// 3 seconds when it reaches 15 seconds without a pause.
-struct Segmenter {
-    static let frameLength = Int(Recorder.sampleRate) / 10  // 100 ms
-    private let minFrames = 30
-    private let maxFrames = 150
-    private let pauseFrames = 3
-
-    private var samples: [Float] = []
-    private var levels: [Float] = []  // Level of each complete frame in `samples`
-    private var loudest: Float = 0
-
-    mutating func append(_ input: [Float]) -> [[Float]] {
-        samples += input
-        var segments: [[Float]] = []
-        while (levels.count + 1) * Self.frameLength <= samples.count {
-            let start = levels.count * Self.frameLength
-            let level = Recorder.level(samples[start..<start + Self.frameLength])
-            levels.append(level)
-            loudest = max(loudest, level)
-
-            if levels.count >= minFrames, levels.suffix(pauseFrames).allSatisfy({ $0 < threshold }) {
-                segments.append(cut(atFrame: levels.count))
-            } else if levels.count >= maxFrames {
-                let recent = levels.indices.suffix(minFrames)
-                let quietest = recent.min { levels[$0] < levels[$1] }!
-                segments.append(cut(atFrame: quietest + 1))
-            }
-        }
-        return segments
-    }
-
-    /// Whether `audio` is above the threshold for at least 200 ms in total. Short windows keep
-    /// brief clicks, such as the hotkey's, from counting as speech.
-    func containsSpeech(_ audio: [Float]) -> Bool {
-        let window = Self.frameLength / 5  // 20 ms
-        let loud = stride(from: 0, to: audio.count - window + 1, by: window).count { start in
-            Recorder.level(audio[start..<start + window]) >= threshold
-        }
-        return loud >= 10
-    }
-
-    /// Speech level: a tenth of the loudest so far, with a floor for near-silent recordings.
-    private var threshold: Float {
-        max(loudest / 10, 0.002)
-    }
-
-    /// Returns the audio not yet returned as a segment.
-    mutating func finish() -> [Float] {
-        defer {
-            samples = []
-            levels = []
-        }
-        return samples
-    }
-
-    private mutating func cut(atFrame frame: Int) -> [Float] {
-        let end = frame * Self.frameLength
-        let segment = Array(samples[..<end])
-        samples.removeFirst(end)
-        levels.removeFirst(frame)
-        return segment
     }
 }

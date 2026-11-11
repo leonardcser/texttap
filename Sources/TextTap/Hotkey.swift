@@ -11,7 +11,9 @@ enum HotkeyEvent {
 /// Detects the dictation hotkey with a session event tap: a double tap or hold of a
 /// modifier in double-tap mode, or a key binding in shortcut mode.
 final class Hotkey {
-    var config: HotkeyConfig
+    var config: HotkeyConfig {
+        didSet { parseConfig() }
+    }
     /// Events are delivered on the main queue.
     var onEvent: (HotkeyEvent) -> Void = { _ in }
     /// Escape is swallowed and reported only while this returns true.
@@ -29,9 +31,19 @@ final class Hotkey {
     private var isHolding = false
     private var lastTap: Date?
     private var holdTimer: DispatchWorkItem?
+    // Parsed from `config` once, because the event tap runs for every key event.
+    private var modifier: (flag: CGEventFlags, deviceMask: UInt64?)?
+    private var shortcut: (keyCode: UInt16, modifiers: CGEventFlags)?
 
     init(config: HotkeyConfig) {
         self.config = config
+        parseConfig()
+    }
+
+    private func parseConfig() {
+        let key = config.key.lowercased()
+        modifier = Self.modifierFlags[key].map { ($0, Self.deviceMasks[key]) }
+        shortcut = Self.parse(config.shortcut)
     }
 
     var isInstalled: Bool { tap != nil }
@@ -97,8 +109,8 @@ final class Hotkey {
     /// A press shorter than the hold threshold is a tap, and two taps toggle dictation.
     /// A longer press is push-to-talk. Any other key or modifier makes it a shortcut instead.
     private func handleModifier(_ type: CGEventType, _ flags: CGEventFlags) {
-        let key = config.key.lowercased()
-        guard let flag = Self.modifierFlags[key] else { return }
+        guard let modifier else { return }
+        let flag = modifier.flag
 
         if type == .keyDown {
             if keyIsDown {
@@ -109,7 +121,7 @@ final class Hotkey {
         }
         guard type == .flagsChanged else { return }
 
-        let pressed: Bool = Self.deviceMasks[key].map { flags.rawValue & $0 != 0 } ?? flags.contains(flag)
+        let pressed: Bool = modifier.deviceMask.map { flags.rawValue & $0 != 0 } ?? flags.contains(flag)
         let otherModifiers = !flags.subtracting(flag)
             .intersection([.maskCommand, .maskAlternate, .maskShift, .maskControl]).isEmpty
 
@@ -152,7 +164,7 @@ final class Hotkey {
 
     private func handleShortcut(_ type: CGEventType, _ keyCode: UInt16, _ flags: CGEventFlags) -> Bool {
         guard type == .keyDown,
-              let shortcut = Self.parse(config.shortcut),
+              let shortcut,
               keyCode == shortcut.keyCode,
               flags.contains(shortcut.modifiers) else { return false }
         emit(.toggle)
